@@ -419,3 +419,39 @@ fn query_renders_session_intent_label_from_created_epoch() {
     );
     assert_eq!(workstreams[0].title, "Repair listing");
 }
+
+#[test]
+fn query_preserves_raw_secret_bearing_fields_for_matcher_identity() {
+    let conn = Connection::open_in_memory().unwrap();
+    setup_workstream_schema(&conn);
+    conn.execute(
+        "INSERT INTO workstreams
+         (project, title, description, status, progress, next_action, blockers,
+          created_at_epoch, updated_at_epoch, owner_scope, owner_key,
+          session_intent, session_topic, session_intent_source)
+         VALUES ('/home/u/project2abcd1234567890abcdef12', 'token=abc',
+                 'token=desc-secret', 'active', 'token=progress-secret',
+                 'token=next-secret', 'token=blocker-secret', 1735660800, 1735660800,
+                 'repo', '/home/u/project2abcd1234567890abcdef12', 'fix',
+                 'token=mcp-cli-workstream-secret', 'summary')",
+        [],
+    )
+    .unwrap();
+
+    let workstreams =
+        query_active_workstreams(&conn, "/home/u/project2abcd1234567890abcdef12").unwrap();
+    assert_eq!(workstreams.len(), 1);
+    assert_eq!(
+        workstreams[0].project,
+        "/home/u/project2abcd1234567890abcdef12"
+    );
+    assert_eq!(workstreams[0].title, "token=abc");
+    assert_eq!(
+        workstreams[0].session_topic.as_deref(),
+        Some("token=mcp-cli-workstream-secret")
+    );
+    assert_eq!(
+        workstreams[0].description.as_deref(),
+        Some("token=desc-secret")
+    );
+}

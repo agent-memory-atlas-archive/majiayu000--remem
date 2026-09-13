@@ -45,10 +45,21 @@ fn run_workstream_list(
 ) -> Result<()> {
     let conn = db::open_db()?;
     let status_str = status.map(WorkstreamStatusArg::as_str);
-    let results = workstream::query_workstreams(&conn, project, status_str)?;
+    let results = workstream::query_workstreams(&conn, project, status_str)?
+        .into_iter()
+        .map(|item| {
+            workstream::redact_workstream_for_output(
+                item,
+                crate::adapter::common::redact_projected_sensitive_text,
+                crate::adapter::common::redact_projected_project_text,
+            )
+        })
+        .collect::<Vec<_>>();
     if json {
         let output = WorkstreamListJson {
-            project: project.to_string(),
+            // Envelope project comes from --project; redact so list JSON cannot
+            // echo a credential-bearing argument while item.project is sanitized.
+            project: crate::adapter::common::redact_projected_project_text(project),
             status: status_str.map(str::to_string),
             count: results.len(),
             workstreams: results,
@@ -215,6 +226,149 @@ mod tests {
     fn workstream_update_rejects_empty_mutation() {
         let error = validate_workstream_update_request(None, None, None, true).unwrap_err();
         assert!(error.to_string().contains("--status"));
+    }
+
+    #[test]
+    fn list_projection_redacts_secret_bearing_fields() {
+        let workstreams = vec![workstream::redact_workstream_for_output(
+            workstream::WorkStream {
+                id: 7,
+                project: "test/proj".to_string(),
+                title: "Safe listing".to_string(),
+                description: Some("token=desc-secret".to_string()),
+                status: workstream::WorkStreamStatus::Active,
+                progress: Some("token=progress-secret".to_string()),
+                next_action: Some("token=next-secret".to_string()),
+                blockers: Some("token=blocker-secret".to_string()),
+                created_at_epoch: 1735660800,
+                updated_at_epoch: 1735660800,
+                completed_at_epoch: None,
+                mmdd: None,
+                session_intent: Some("fix".to_string()),
+                session_topic: Some("token=mcp-cli-workstream-secret".to_string()),
+                display_label: None,
+                session_intent_source: Some("summary".to_string()),
+            },
+            crate::adapter::common::redact_projected_sensitive_text,
+            crate::adapter::common::redact_projected_project_text,
+        )];
+        let rendered = render_workstream_list(&workstreams);
+        assert!(
+            !rendered.contains("mcp-cli-workstream-secret"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("token=[REDACTED]"), "{rendered}");
+        let encoded = serde_json::to_string(&workstreams).unwrap();
+        assert!(!encoded.contains("desc-secret"), "{encoded}");
+        assert!(!encoded.contains("progress-secret"), "{encoded}");
+        assert!(!encoded.contains("next-secret"), "{encoded}");
+        assert!(!encoded.contains("blocker-secret"), "{encoded}");
+    }
+
+    #[test]
+    fn list_projection_redacts_short_inline_credential_assignments() {
+        let workstreams = vec![workstream::redact_workstream_for_output(
+            workstream::WorkStream {
+                id: 8,
+                project: "test/proj".to_string(),
+                title: "Investigate token=abc123".to_string(),
+                description: Some("Fix OAuth token=short-secret".to_string()),
+                status: workstream::WorkStreamStatus::Active,
+                progress: None,
+                next_action: Some("Rotate token=xyz789".to_string()),
+                blockers: None,
+                created_at_epoch: 1735660800,
+                updated_at_epoch: 1735660800,
+                completed_at_epoch: None,
+                mmdd: None,
+                session_intent: Some("FIX".to_string()),
+                session_topic: Some("Investigate token=abc123".to_string()),
+                display_label: None,
+                session_intent_source: Some("summary".to_string()),
+            },
+            crate::adapter::common::redact_projected_sensitive_text,
+            crate::adapter::common::redact_projected_project_text,
+        )];
+        let encoded = serde_json::to_string(&workstreams).unwrap();
+        assert!(!encoded.contains("abc123"), "{encoded}");
+        assert!(!encoded.contains("short-secret"), "{encoded}");
+        assert!(!encoded.contains("xyz789"), "{encoded}");
+        assert!(encoded.contains("token=[REDACTED]"), "{encoded}");
+    }
+
+    #[test]
+    fn list_json_envelope_redacts_secret_bearing_project() {
+        let project = "token=envelope-project-secret";
+        let output = WorkstreamListJson {
+            project: crate::adapter::common::redact_projected_project_text(project),
+            status: None,
+            count: 0,
+            workstreams: vec![],
+        };
+        let encoded = serde_json::to_string(&output).unwrap();
+        assert!(!encoded.contains("envelope-project-secret"), "{encoded}");
+        assert!(encoded.contains("token=[REDACTED]"), "{encoded}");
+    }
+
+    #[test]
+    fn list_projection_redacts_space_separated_credential_options() {
+        let workstreams = vec![workstream::redact_workstream_for_output(
+            workstream::WorkStream {
+                id: 9,
+                project: "test/proj".to_string(),
+                title: "Safe listing".to_string(),
+                description: None,
+                status: workstream::WorkStreamStatus::Active,
+                progress: Some("Run curl --oauth2-bearer tiny-token".to_string()),
+                next_action: Some("Retry with -u alice:pw".to_string()),
+                blockers: None,
+                created_at_epoch: 1735660800,
+                updated_at_epoch: 1735660800,
+                completed_at_epoch: None,
+                mmdd: None,
+                session_intent: Some("FIX".to_string()),
+                session_topic: Some("Command remediation".to_string()),
+                display_label: None,
+                session_intent_source: Some("summary".to_string()),
+            },
+            crate::adapter::common::redact_projected_sensitive_text,
+            crate::adapter::common::redact_projected_project_text,
+        )];
+        let encoded = serde_json::to_string(&workstreams).unwrap();
+        assert!(!encoded.contains("tiny-token"), "{encoded}");
+        assert!(!encoded.contains("alice:pw"), "{encoded}");
+        assert!(encoded.contains("--oauth2-bearer [REDACTED]"), "{encoded}");
+        assert!(encoded.contains("-u [REDACTED]"), "{encoded}");
+    }
+
+    #[test]
+    fn list_projection_preserves_benign_long_project_paths() {
+        let project = "/home/u/project2abcd1234567890abcdef12";
+        let workstreams = vec![workstream::redact_workstream_for_output(
+            workstream::WorkStream {
+                id: 10,
+                project: project.to_string(),
+                title: "Path listing".to_string(),
+                description: None,
+                status: workstream::WorkStreamStatus::Active,
+                progress: None,
+                next_action: None,
+                blockers: None,
+                created_at_epoch: 1735660800,
+                updated_at_epoch: 1735660800,
+                completed_at_epoch: None,
+                mmdd: None,
+                session_intent: Some("FIX".to_string()),
+                session_topic: Some("Path listing".to_string()),
+                display_label: None,
+                session_intent_source: Some("summary".to_string()),
+            },
+            crate::adapter::common::redact_projected_sensitive_text,
+            crate::adapter::common::redact_projected_project_text,
+        )];
+        let encoded = serde_json::to_string(&workstreams).unwrap();
+        assert!(encoded.contains(project), "{encoded}");
+        assert!(!encoded.contains("[REDACTED]"), "{encoded}");
     }
 
     #[test]
