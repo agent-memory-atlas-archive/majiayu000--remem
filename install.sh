@@ -94,13 +94,16 @@ echo "Verified checksum for ${CHECKSUM_ENTRY}"
 tar xzf "${TMPDIR}/remem.tar.gz" -C "${TMPDIR}"
 mv "${TMPDIR}/remem" "${INSTALL_DIR}/remem"
 chmod +x "${INSTALL_DIR}/remem"
-# macOS ARM requires ad-hoc codesign after replacing binary
+# Keep a Developer ID signature when the downloaded binary already has one.
+# Only ad-hoc sign when macOS ARM refuses an unsigned replacement.
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
   if ! command -v codesign >/dev/null 2>&1; then
     echo "codesign is required on macOS ARM after replacing ${INSTALL_DIR}/remem"
     exit 1
   fi
-  if ! codesign -s - -f "${INSTALL_DIR}/remem"; then
+  if codesign --verify --strict "${INSTALL_DIR}/remem" >/dev/null 2>&1; then
+    echo "Kept existing code signature for ${INSTALL_DIR}/remem"
+  elif ! codesign -s - -f "${INSTALL_DIR}/remem"; then
     echo "Failed to ad-hoc codesign ${INSTALL_DIR}/remem"
     exit 1
   fi
