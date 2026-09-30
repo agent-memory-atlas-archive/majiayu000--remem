@@ -186,6 +186,32 @@ fn load(conn: &Connection, target: &Target) -> Result<Current> {
     .map_err(internal)?
     .ok_or(Failure(StatusCode::CONFLICT, "session_summary_required"))
 }
+fn redact_override_text(text: &str) -> String {
+    let continued = text.replace("\\\r\n", "").replace("\\\n", "");
+    let single_line = continued.split_whitespace().collect::<Vec<_>>().join(" ");
+    redact_projected_sensitive_text(&single_line)
+}
+fn bounded_topic(redacted: &str) -> String {
+    const MARKER: &str = "[REDACTED]";
+    let mut topic = String::new();
+    for part in redacted.split_inclusive(MARKER) {
+        let remaining = TOPIC_MAX_CHARS - topic.chars().count();
+        if part.chars().count() <= remaining {
+            topic.push_str(part);
+        } else {
+            if let Some(benign) = part.strip_suffix(MARKER) {
+                if remaining >= MARKER.len() {
+                    topic.extend(benign.chars().take(remaining - MARKER.len()));
+                    topic.push_str(MARKER);
+                }
+            } else {
+                topic.extend(part.chars().take(remaining));
+            }
+            break;
+        }
+    }
+    topic
+}
 fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json::Value> {
     if request.targets.is_empty() || request.targets.len() > 50 {
         return Err(Failure(
@@ -215,10 +241,7 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
             }
             let normalized = normalize_topic(raw)
                 .ok_or(Failure(StatusCode::BAD_REQUEST, "session_topic_invalid"))?;
-            Ok(redact_projected_sensitive_text(&normalized)
-                .chars()
-                .take(TOPIC_MAX_CHARS)
-                .collect())
+            Ok(bounded_topic(&redact_override_text(&normalized)))
         })
         .transpose()?;
     let reason = request.reason.trim();
@@ -231,7 +254,7 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
     let mut snapshot = Snapshot {
         changes: vec![],
         fingerprints: vec![],
-        reason: redact_projected_sensitive_text(reason),
+        reason: redact_override_text(reason),
         expires_at_epoch: chrono::Utc::now().timestamp() + TTL_SECONDS,
     };
     for target in request.targets {
@@ -240,7 +263,7 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
         let mut before = current.fields;
         before.session_topic = before
             .session_topic
-            .map(|s| redact_bounded(&redact_projected_sensitive_text(&s)));
+            .map(|s| redact_bounded(&redact_override_text(&s)));
         snapshot.changes.push(Change {
             target,
             before,
@@ -590,7 +613,7 @@ mod tests {
             VALUES ('intent-redaction-test','test',?1,1,'curl --oauth2-bearer old-bearer')",[session.id]).unwrap();
         let mut r = request(vec![workstream.clone(), session.clone()]);
         r.session_topic = Some("Investigate token=abc123".into());
-        r.reason = "Correct label after curl --oauth2-bearer tiny-token".into();
+        r.reason = "Correct label after curl --oauth2-bearer \\\ntiny-token".into();
         let p = preview(&mut conn, r).unwrap();
         assert_eq!(
             p["changes"][0]["before"]["session_topic"],
@@ -650,13 +673,10 @@ mod tests {
         let mut conn = db::open_db().unwrap();
         let target = workstream(&conn, "Redaction length test");
         let mut r = request(vec![target.clone()]);
-        let topic = format!("Investigate token=x {}", "topic ".repeat(10));
-        r.session_topic = Some(topic);
+        let prefix = "Investigate ".repeat(6);
+        r.session_topic = Some(format!("{prefix} token=x"));
         assert_eq!(r.session_topic.as_ref().unwrap().chars().count(), 80);
-        let expected = format!("Investigate token=[REDACTED] {}", "topic ".repeat(10))
-            .chars()
-            .take(TOPIC_MAX_CHARS)
-            .collect::<String>();
+        let expected = format!("{}[REDACTED]", &prefix[..70]);
         let p = preview(&mut conn, r).unwrap();
         assert_eq!(p["changes"][0]["after"]["session_topic"], expected);
         apply(&mut conn, apply_request(&p)).unwrap();
@@ -720,6 +740,13 @@ mod tests {
         r.session_topic = Some("token=private-secret-value".into());
         let p = preview(&mut conn, r).unwrap();
         assert!(!p.to_string().contains("private-secret-value"));
+        let mut r = request(vec![a.clone()]);
+        r.session_topic = Some("curl --oauth2-bearer \\\ntiny-token".into());
+        let multiline = preview(&mut conn, r).unwrap();
+        assert_eq!(
+            multiline["changes"][0]["after"]["session_topic"],
+            "curl --oauth2-bearer [REDACTED]"
+        );
         conn.execute("INSERT INTO memory_suppressions(target_kind,target_value,reason,actor,status,created_at_epoch,updated_at_epoch)
             VALUES ('pattern','Private test title','test','test','active',1,1)",[]).unwrap();
         assert_eq!(
