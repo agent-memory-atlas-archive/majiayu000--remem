@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::read_resources::redact_bounded;
 use crate::adapter::common::redact_projected_sensitive_text;
+use crate::adapter::redaction::redact_tokens;
 use crate::memory::session_label::{normalize_topic, SessionIntent, TOPIC_MAX_CHARS};
 
 const PREVIEW_EVENT: &str = "session_intent_preview";
@@ -35,6 +36,9 @@ impl Failure {
             "target_not_found" => "A selected session or canonical workstream is unavailable.",
             "session_topic_unsafe" => {
                 "The topic contains unsafe instructions. Use a descriptive topic."
+            }
+            "session_intent_cross_line_sensitive_argument" => {
+                "Put each sensitive option and its value on the same line before previewing."
             }
             "session_intent_invalid" => "Choose a supported intent code or explicitly clear it.",
             "session_topic_invalid" => "Use a topic of 1 to 80 characters or explicitly clear it.",
@@ -186,9 +190,19 @@ fn load(conn: &Connection, target: &Target) -> Result<Current> {
     .map_err(internal)?
     .ok_or(Failure(StatusCode::CONFLICT, "session_summary_required"))
 }
-fn redact_override_text(text: &str) -> String {
+fn redact_override_text(text: &str) -> Result<String> {
     let continued = text.replace("\\\r\n", "").replace("\\\n", "");
-    redact_projected_sensitive_text(&continued)
+    let projected = redact_projected_sensitive_text(&continued);
+    // Compare only after projection so header redaction keeps unrelated rationale.
+    // A changed token pass exposes cross-line option/value ambiguity, including
+    // YAML list prefixes that the shell walker may consume as an argument.
+    if redact_tokens(&projected, true, false) != projected {
+        return Err(Failure(
+            StatusCode::BAD_REQUEST,
+            "session_intent_cross_line_sensitive_argument",
+        ));
+    }
+    Ok(projected)
 }
 fn bounded_topic(redacted: &str) -> String {
     const MARKER: &str = "[REDACTED]";
@@ -240,7 +254,7 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
             }
             normalize_topic(raw)
                 .ok_or(Failure(StatusCode::BAD_REQUEST, "session_topic_invalid"))?;
-            let redacted = redact_override_text(raw);
+            let redacted = redact_override_text(raw)?;
             let topic = bounded_topic(redacted.trim());
             if crate::memory::poisoning::scan_instruction_pattern(&topic).is_some() {
                 return Err(Failure(StatusCode::BAD_REQUEST, "session_topic_unsafe"));
@@ -252,13 +266,14 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
     if reason.is_empty() || reason.chars().count() > 1000 {
         return Err(Failure(StatusCode::BAD_REQUEST, "reason_invalid"));
     }
+    let reason = redact_override_text(reason)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(internal)?;
     let mut snapshot = Snapshot {
         changes: vec![],
         fingerprints: vec![],
-        reason: redact_override_text(reason),
+        reason,
         expires_at_epoch: chrono::Utc::now().timestamp() + TTL_SECONDS,
     };
     for target in request.targets {
@@ -267,7 +282,10 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
         let mut before = current.fields;
         before.session_topic = before
             .session_topic
-            .map(|s| redact_bounded(&redact_override_text(&s)));
+            .as_deref()
+            .map(redact_override_text)
+            .transpose()?
+            .map(|s| redact_bounded(&s));
         snapshot.changes.push(Change {
             target,
             before,
@@ -688,6 +706,119 @@ mod tests {
                     .as_deref(),
                 Some("Investigate token=[REDACTED]")
             );
+        }
+    }
+    #[tokio::test]
+    async fn session_intent_override_rejects_cross_line_sensitive_arguments_without_writes() {
+        let _scope = ScopedTestDataDir::new("intent-override-cross-line");
+        let conn = db::open_db().unwrap();
+        let mut failures = Vec::new();
+        for text in [
+            "curl --oauth2-bearer\ntiny-token",
+            "curl --oauth2-bearer\r\ntiny-token",
+            "- curl\n- --oauth2-bearer\n- tiny-token",
+            "- curl\r\n- --oauth2-bearer\r\n- tiny-token",
+            "Bearer\ntiny-token",
+        ] {
+            for field in ["session_topic", "reason", "prior_topic"] {
+                let target = workstream(&conn, "Cross-line test");
+                let mut body = json!({"targets":[target],"session_intent":"doc",
+                    "session_topic":"New topic","reason":"Correct classification"});
+                if field == "prior_topic" {
+                    conn.execute(
+                        "UPDATE workstreams SET session_topic=?1 WHERE id=?2",
+                        params![text, target.id],
+                    )
+                    .unwrap();
+                } else {
+                    body[field] = json!(text);
+                }
+                let before = load(&conn, &target).unwrap().fields;
+                let event_count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                    .unwrap();
+                let response = handle_session_intent_preview(Bytes::from(body.to_string())).await;
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if status != StatusCode::BAD_REQUEST {
+                    let audit_leaks: bool = conn
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM events WHERE detail LIKE '%tiny-token%')",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    failures.push(format!(
+                        "{field} {text:?}: {status}, preview_leaks={}, audit_leaks={audit_leaks}",
+                        payload.to_string().contains("tiny-token")
+                    ));
+                    continue;
+                }
+                assert_eq!(
+                    payload["error"]["code"],
+                    "session_intent_cross_line_sensitive_argument"
+                );
+                assert!(payload["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("same line"));
+                assert!(!payload.to_string().contains("tiny-token"));
+                assert!(payload.get("preview_token").is_none());
+                assert_eq!(
+                    conn.query_row("SELECT COUNT(*) FROM events", [], |row| row
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    event_count
+                );
+                assert_eq!(load(&conn, &target).unwrap().fields, before);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn session_intent_override_preserves_safe_multiline_and_same_line_controls() {
+        let _scope = ScopedTestDataDir::new("intent-override-safe-multiline");
+        let mut conn = db::open_db().unwrap();
+        let target = workstream(&conn, "Safe multiline test");
+        let mut r = request(vec![target.clone()]);
+        r.session_topic = Some("  Investigate\n token=abc123  ".into());
+        r.reason = "Authorization: Bearer reason-secret\nCorrect label\nafter curl --oauth2-bearer tiny-token\nKeep rationale".into();
+        let p = preview(&mut conn, r).unwrap();
+        assert_eq!(
+            p["changes"][0]["after"]["session_topic"],
+            "Investigate\n token=[REDACTED]"
+        );
+        let expected_reason = "Authorization:[REDACTED]\nCorrect label\nafter curl --oauth2-bearer [REDACTED]\nKeep rationale";
+        assert_eq!(p["reason"], expected_reason);
+        let applied = apply(&mut conn, apply_request(&p)).unwrap();
+        assert_eq!(applied["changes"], p["changes"]);
+        assert_eq!(
+            load(&conn, &target)
+                .unwrap()
+                .fields
+                .session_topic
+                .as_deref(),
+            Some("Investigate\n token=[REDACTED]")
+        );
+        let audits = conn
+            .prepare("SELECT detail FROM events WHERE event_type IN (?1,?2) ORDER BY id")
+            .unwrap()
+            .query_map(params![PREVIEW_EVENT, APPLIED_EVENT], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(audits.len(), 2);
+        for audit in audits {
+            let value: serde_json::Value = serde_json::from_str(&audit).unwrap();
+            assert_eq!(value["reason"], expected_reason);
+            for secret in ["abc123", "tiny-token", "reason-secret"] {
+                assert!(!audit.contains(secret));
+            }
         }
     }
     #[test]
