@@ -24,12 +24,12 @@ pub(crate) fn redact_session_label(
     if let Some(topic) = label.session_topic.as_deref() {
         // Preserve whole-line assignment redaction before applying the stricter
         // inline/option redactor. Rendered labels already passed topic validation.
-        let safe_topic = redact_sensitive_text(topic);
+        let safe_topic = redact_projected_sensitive_text(&redact_sensitive_text(topic));
         label.display_label = label
             .display_label
             .map(|text| text.replacen(topic, &safe_topic, 1));
         label.display_title = label.display_title.replacen(topic, &safe_topic, 1);
-        label.session_topic = Some(redact_projected_sensitive_text(&safe_topic));
+        label.session_topic = Some(safe_topic);
     }
     label.display_label = label
         .display_label

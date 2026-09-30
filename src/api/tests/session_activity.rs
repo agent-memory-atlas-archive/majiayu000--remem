@@ -61,6 +61,11 @@ async fn activity_rest_labels_redact_projected_topics_and_preserve_intent_filter
             "curl --oauth2-bearer [REDACTED]".to_string(),
         ),
         (
+            "--oauth2-bearer tiny-token".to_string(),
+            "--oauth2-bearer [REDACTED]".to_string(),
+        ),
+        ("-u alice:pw".to_string(), "-u [REDACTED]".to_string()),
+        (
             format!("{} token=x", ("Review label ".repeat(5) + "results")),
             format!(
                 "{} token=[REDACTED]",
@@ -93,7 +98,7 @@ async fn activity_rest_labels_redact_projected_topics_and_preserve_intent_filter
                 format!("0101｜fix｜{expected}")
             );
             let encoded = payload.to_string();
-            for secret in ["abc123", "tiny-token", "token=x"] {
+            for secret in ["abc123", "tiny-token", "token=x", "alice:pw"] {
                 assert!(!encoded.contains(secret), "{encoded}");
             }
         }

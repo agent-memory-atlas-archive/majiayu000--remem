@@ -116,6 +116,11 @@ async fn session_intent_labels_redact_projected_topics_after_rendering() -> anyh
             "curl --oauth2-bearer [REDACTED]".to_string(),
         ),
         (
+            "--oauth2-bearer tiny-token".to_string(),
+            "--oauth2-bearer [REDACTED]".to_string(),
+        ),
+        ("-u alice:pw".to_string(), "-u [REDACTED]".to_string()),
+        (
             format!("{} token=x", ("Review label ".repeat(5) + "results")),
             format!(
                 "{} token=[REDACTED]",
@@ -141,24 +146,25 @@ async fn session_intent_labels_redact_projected_topics_after_rendering() -> anyh
                 let (status, response) = get_json(&app, &uri, &token).await?;
                 assert_eq!(status, StatusCode::OK);
                 let encoded = response.to_string();
-                assert!(!encoded.contains("label-secret-token"), "{uri}: {encoded}");
-                assert!(
-                    !encoded.contains("label-private@example.com"),
-                    "{uri}: {encoded}"
-                );
                 let item = if response["data"].is_array() {
                     &response["data"][0]
                 } else {
                     &response["data"]
                 };
                 assert_eq!(item["session_intent"], "fix");
-                assert!(item["display_label"].is_string());
                 assert_eq!(item["session_topic"], expected);
                 assert!(item["display_label"]
                     .as_str()
                     .unwrap()
                     .ends_with(&format!("｜fix｜{expected}")));
-                for secret in ["abc123", "tiny-token", "token=x"] {
+                for secret in [
+                    "abc123",
+                    "tiny-token",
+                    "token=x",
+                    "alice:pw",
+                    "label-secret-token",
+                    "label-private@example.com",
+                ] {
                     assert!(!encoded.contains(secret), "{uri}: {encoded}");
                 }
             }

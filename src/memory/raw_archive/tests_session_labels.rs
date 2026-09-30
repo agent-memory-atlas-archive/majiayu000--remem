@@ -271,6 +271,11 @@ fn list_sessions_redacts_projected_labels_without_losing_expanded_topics() {
             "curl --oauth2-bearer [REDACTED]".to_string(),
         ),
         (
+            "--oauth2-bearer tiny-token".to_string(),
+            "--oauth2-bearer [REDACTED]".to_string(),
+        ),
+        ("-u alice:pw".to_string(), "-u [REDACTED]".to_string()),
+        (
             format!("{} token=x", ("Review label ".repeat(5) + "results")),
             format!(
                 "{} token=[REDACTED]",
@@ -312,7 +317,7 @@ fn list_sessions_redacts_projected_labels_without_losing_expanded_topics() {
             Some(format!("0101｜fix｜{expected}").as_str())
         );
         let encoded = serde_json::to_string(&sessions).unwrap();
-        for secret in ["abc123", "tiny-token", "token=x"] {
+        for secret in ["abc123", "tiny-token", "token=x", "alice:pw"] {
             assert!(!encoded.contains(secret), "{encoded}");
         }
     }
