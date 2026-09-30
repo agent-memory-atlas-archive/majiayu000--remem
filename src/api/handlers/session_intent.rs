@@ -11,6 +11,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::super::read_resources::redact_bounded;
+use crate::adapter::common::redact_projected_sensitive_text;
 use crate::memory::session_label::{normalize_topic, SessionIntent};
 
 const PREVIEW_EVENT: &str = "session_intent_preview";
@@ -214,8 +215,7 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
             }
             let normalized = normalize_topic(raw)
                 .ok_or(Failure(StatusCode::BAD_REQUEST, "session_topic_invalid"))?;
-            normalize_topic(&redact_bounded(&normalized))
-                .ok_or(Failure(StatusCode::BAD_REQUEST, "session_topic_invalid"))
+            Ok(redact_projected_sensitive_text(&normalized))
         })
         .transpose()?;
     let reason = request.reason.trim();
@@ -228,14 +228,16 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
     let mut snapshot = Snapshot {
         changes: vec![],
         fingerprints: vec![],
-        reason: crate::adapter::common::redact_sensitive_text(reason),
+        reason: redact_projected_sensitive_text(reason),
         expires_at_epoch: chrono::Utc::now().timestamp() + TTL_SECONDS,
     };
     for target in request.targets {
         let current = load(&tx, &target)?;
         snapshot.fingerprints.push(fingerprint(&current)?);
         let mut before = current.fields;
-        before.session_topic = before.session_topic.map(|s| redact_bounded(&s));
+        before.session_topic = before
+            .session_topic
+            .map(|s| redact_bounded(&redact_projected_sensitive_text(&s)));
         snapshot.changes.push(Change {
             target,
             before,
@@ -544,6 +546,119 @@ mod tests {
                 .session_intent
                 .as_deref(),
             Some("doc")
+        );
+    }
+    #[test]
+    fn session_intent_override_redacts_embedded_secrets_before_snapshot_and_apply() {
+        let _scope = ScopedTestDataDir::new("intent-override-embedded-secrets");
+        let mut conn = db::open_db().unwrap();
+        let workstream = workstream(&conn, "Redaction test");
+        conn.execute(
+            "UPDATE workstreams SET session_topic='Investigate token=old-secret' WHERE id=?1",
+            [workstream.id],
+        )
+        .unwrap();
+        let outcome = db::record_captured_event(
+            &conn,
+            &db::CaptureEventInput {
+                host: "codex-cli",
+                session_id: "intent-redaction-test",
+                project: "test",
+                cwd: None,
+                event_type: "tool_result",
+                role: Some("tool"),
+                tool_name: Some("Edit"),
+                content: "test",
+                task_kind: Some(db::ExtractionTaskKind::ObservationExtract),
+            },
+        )
+        .unwrap();
+        let session = Target {
+            kind: Kind::Session,
+            id: conn
+                .query_row(
+                    "SELECT session_row_id FROM captured_events WHERE id=?1",
+                    [outcome.event_row_id],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+        };
+        conn.execute("INSERT INTO session_summaries(memory_session_id,project,session_row_id,created_at_epoch,session_topic)
+            VALUES ('intent-redaction-test','test',?1,1,'curl --oauth2-bearer old-bearer')",[session.id]).unwrap();
+        let mut r = request(vec![workstream.clone(), session.clone()]);
+        r.session_topic = Some("Investigate token=abc123".into());
+        r.reason = "Correct label after curl --oauth2-bearer tiny-token".into();
+        let p = preview(&mut conn, r).unwrap();
+        assert_eq!(
+            p["changes"][0]["before"]["session_topic"],
+            "Investigate token=[REDACTED]"
+        );
+        assert_eq!(
+            p["changes"][1]["before"]["session_topic"],
+            "curl --oauth2-bearer [REDACTED]"
+        );
+        for change in p["changes"].as_array().unwrap() {
+            assert_eq!(
+                change["after"]["session_topic"],
+                "Investigate token=[REDACTED]"
+            );
+        }
+        assert_eq!(
+            p["reason"],
+            "Correct label after curl --oauth2-bearer [REDACTED]"
+        );
+        let applied = apply(&mut conn, apply_request(&p)).unwrap();
+        let audits = conn
+            .prepare("SELECT detail FROM events WHERE event_type IN (?1,?2) ORDER BY id")
+            .unwrap()
+            .query_map(params![PREVIEW_EVENT, APPLIED_EVENT], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(audits.len(), 2);
+        for payload in [p.to_string(), applied.to_string()]
+            .into_iter()
+            .chain(audits)
+        {
+            assert!(payload.contains("[REDACTED]"));
+            for secret in ["abc123", "tiny-token", "old-secret", "old-bearer"] {
+                assert!(
+                    !payload.contains(secret),
+                    "secret leaked in override payload"
+                );
+            }
+        }
+        for target in [workstream, session] {
+            assert_eq!(
+                load(&conn, &target)
+                    .unwrap()
+                    .fields
+                    .session_topic
+                    .as_deref(),
+                Some("Investigate token=[REDACTED]")
+            );
+        }
+    }
+    #[test]
+    fn session_intent_override_accepts_topic_at_limit_before_redaction() {
+        let _scope = ScopedTestDataDir::new("intent-override-redaction-length");
+        let mut conn = db::open_db().unwrap();
+        let target = workstream(&conn, "Redaction length test");
+        let mut r = request(vec![target.clone()]);
+        let prefix = "Investigate ".repeat(6);
+        r.session_topic = Some(format!("{prefix} token=x"));
+        assert_eq!(r.session_topic.as_ref().unwrap().chars().count(), 80);
+        let p = preview(&mut conn, r).unwrap();
+        assert_eq!(
+            p["changes"][0]["after"]["session_topic"],
+            format!("{prefix} token=[REDACTED]")
+        );
+        apply(&mut conn, apply_request(&p)).unwrap();
+        assert_eq!(
+            load(&conn, &target).unwrap().fields.session_topic,
+            Some(format!("{prefix} token=[REDACTED]"))
         );
     }
     #[tokio::test]
