@@ -290,18 +290,24 @@ def main() -> int:
     if not args.fast:
         for name, command in full_steps():
             results.append(run(name, command))
+        (ROOT / "target").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="remem-preflight-", dir=ROOT / "target"
         ) as raw_tmp:
             tmp = Path(raw_tmp)
             shutil.copytree(ROOT / "eval", tmp / "eval")
+            platform_key = (sys.platform, platform.machine())
             report_suffix = {
                 ("darwin", "arm64"): "",
                 ("darwin", "x86_64"): "-x86_64-apple-darwin",
                 ("linux", "x86_64"): "-linux-x86_64",
                 ("linux", "aarch64"): "-aarch64-unknown-linux-gnu",
-            }[(sys.platform, platform.machine())]
-            evidence = run(
+            }.get(platform_key)
+            evidence = StepResult(
+                "Generate current security evidence in ignored eval workspace",
+                "FAIL",
+                f"unsupported platform: {platform_key[0]}/{platform_key[1]}",
+            ) if report_suffix is None else run(
                 "Generate current security evidence in ignored eval workspace",
                 [
                     "cargo", "run", "--locked", "--", "bench", "memory",

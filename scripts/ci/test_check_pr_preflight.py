@@ -1,8 +1,10 @@
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from unittest import mock
+from pathlib import Path
 
 import check_pr_preflight
 
@@ -97,6 +99,39 @@ class PreflightCargoTestThreadsTests(unittest.TestCase):
             self.assertEqual(check_pr_preflight.main(), 1)
         self.assertFalse(any(command[:4] == ["cargo", "run", "--", "eval-gates"] for command in commands))
         self.assertTrue(any(command[:2] == ["cargo", "test"] for command in commands))
+        negative.assert_not_called()
+
+    def test_missing_repository_target_is_created_for_custom_cargo_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            with (
+                mock.patch.object(check_pr_preflight, "ROOT", root),
+                mock.patch.dict("os.environ", {"CARGO_TARGET_DIR": str(root / "elsewhere")}),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.run_main()
+            self.assertTrue((root / "target").is_dir())
+
+    def test_unknown_platform_reports_failure_and_runs_independent_tests(self) -> None:
+        commands: list[list[str]] = []
+        output = io.StringIO()
+        def fake_run(name: str, command: list[str], **kwargs: object) -> check_pr_preflight.StepResult:
+            commands.append(command)
+            return check_pr_preflight.StepResult(name, "PASS")
+        with (
+            mock.patch.object(sys, "argv", ["check_pr_preflight.py"]),
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch("check_pr_preflight.platform.machine", return_value="riscv64"),
+            mock.patch.object(check_pr_preflight, "run", side_effect=fake_run),
+            mock.patch.object(check_pr_preflight, "run_expected_failure") as negative,
+            mock.patch.object(check_pr_preflight, "add_pr_body_steps"),
+            mock.patch("check_pr_preflight.shutil.copytree"),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(check_pr_preflight.main(), 1)
+        self.assertIn("unsupported platform: linux/riscv64", output.getvalue())
+        self.assertTrue(any(command[:2] == ["cargo", "test"] for command in commands))
+        self.assertFalse(any(command[:5] == ["cargo", "run", "--locked", "--", "bench"] for command in commands))
         negative.assert_not_called()
 
     def test_default_command_caps_rust_test_harness_at_four_threads(self) -> None:
