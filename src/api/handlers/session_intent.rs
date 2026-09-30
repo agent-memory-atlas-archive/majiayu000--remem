@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::super::read_resources::redact_bounded;
 use crate::adapter::common::redact_projected_sensitive_text;
-use crate::memory::session_label::{normalize_topic, SessionIntent};
+use crate::memory::session_label::{normalize_topic, SessionIntent, TOPIC_MAX_CHARS};
 
 const PREVIEW_EVENT: &str = "session_intent_preview";
 const APPLIED_EVENT: &str = "session_intent_override";
@@ -215,7 +215,10 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
             }
             let normalized = normalize_topic(raw)
                 .ok_or(Failure(StatusCode::BAD_REQUEST, "session_topic_invalid"))?;
-            Ok(redact_projected_sensitive_text(&normalized))
+            Ok(redact_projected_sensitive_text(&normalized)
+                .chars()
+                .take(TOPIC_MAX_CHARS)
+                .collect())
         })
         .transpose()?;
     let reason = request.reason.trim();
@@ -647,19 +650,30 @@ mod tests {
         let mut conn = db::open_db().unwrap();
         let target = workstream(&conn, "Redaction length test");
         let mut r = request(vec![target.clone()]);
-        let prefix = "Investigate ".repeat(6);
-        r.session_topic = Some(format!("{prefix} token=x"));
+        let topic = format!("Investigate token=x {}", "topic ".repeat(10));
+        r.session_topic = Some(topic);
         assert_eq!(r.session_topic.as_ref().unwrap().chars().count(), 80);
+        let expected = format!("Investigate token=[REDACTED] {}", "topic ".repeat(10))
+            .chars()
+            .take(TOPIC_MAX_CHARS)
+            .collect::<String>();
         let p = preview(&mut conn, r).unwrap();
-        assert_eq!(
-            p["changes"][0]["after"]["session_topic"],
-            format!("{prefix} token=[REDACTED]")
-        );
+        assert_eq!(p["changes"][0]["after"]["session_topic"], expected);
         apply(&mut conn, apply_request(&p)).unwrap();
+        let current = load(&conn, &target).unwrap();
         assert_eq!(
-            load(&conn, &target).unwrap().fields.session_topic,
-            Some(format!("{prefix} token=[REDACTED]"))
+            current.fields.session_topic.as_deref(),
+            Some(expected.as_str())
         );
+        let label = crate::memory::session_label::render_from_stored(
+            Some(1),
+            current.fields.session_intent.as_deref(),
+            current.fields.session_topic.as_deref(),
+            current.fields.session_intent_source.as_deref(),
+            current.title.as_deref(),
+        );
+        assert_eq!(label.session_topic.as_deref(), Some(expected.trim_end()));
+        assert!(label.display_label.is_some());
     }
     #[tokio::test]
     async fn session_intent_override_auth_clear_redaction_and_suppression() {
