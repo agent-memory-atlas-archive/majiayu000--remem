@@ -190,9 +190,16 @@ fn load(conn: &Connection, target: &Target) -> Result<Current> {
     .map_err(internal)?
     .ok_or(Failure(StatusCode::CONFLICT, "session_summary_required"))
 }
-fn redact_override_text(text: &str) -> Result<String> {
+fn project_override_text(text: &str) -> String {
     let continued = text.replace("\\\r\n", "").replace("\\\n", "");
-    let projected = redact_projected_sensitive_text(&continued);
+    continued
+        .lines()
+        .map(redact_projected_sensitive_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+fn redact_override_text(text: &str) -> Result<String> {
+    let projected = project_override_text(text);
     // Compare only after projection so header redaction keeps unrelated rationale.
     // A changed token pass exposes cross-line option/value ambiguity, including
     // YAML list prefixes that the shell walker may consume as an argument.
@@ -280,12 +287,16 @@ fn preview(conn: &mut Connection, request: PreviewRequest) -> Result<serde_json:
         let current = load(&tx, &target)?;
         snapshot.fingerprints.push(fingerprint(&current)?);
         let mut before = current.fields;
-        before.session_topic = before
-            .session_topic
-            .as_deref()
-            .map(redact_override_text)
-            .transpose()?
-            .map(|s| redact_bounded(&s));
+        before.session_topic = before.session_topic.as_deref().map(|text| {
+            let projected = project_override_text(text);
+            // Stored text is display data. Hide ambiguous spans in full:
+            // the token walker can consume a YAML dash before its value.
+            if redact_tokens(&projected, true, false) != projected {
+                "[REDACTED]".to_owned()
+            } else {
+                redact_bounded(&projected)
+            }
+        });
         snapshot.changes.push(Change {
             target,
             before,

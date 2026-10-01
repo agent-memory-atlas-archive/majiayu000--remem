@@ -78,6 +78,7 @@ jobs:
       - name: Generate current security evidence in ignored eval workspace
         run: |
           mkdir -p target/ci-eval
+          rm -rf target/ci-eval/eval
           cp -R eval target/ci-eval/eval
           cd target/ci-eval
           cargo run --locked -- bench memory --suite adversarial-policy --condition remem_default \

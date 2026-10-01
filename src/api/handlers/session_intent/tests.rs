@@ -306,19 +306,11 @@ async fn session_intent_override_rejects_cross_line_sensitive_arguments_without_
         "- curl\r\n- --oauth2-bearer\r\n- tiny-token",
         "Bearer\ntiny-token",
     ] {
-        for field in ["session_topic", "reason", "prior_topic"] {
+        for field in ["session_topic", "reason"] {
             let target = workstream(&conn, "Cross-line test");
             let mut body = json!({"targets":[target],"session_intent":"doc",
                 "session_topic":"New topic","reason":"Correct classification"});
-            if field == "prior_topic" {
-                conn.execute(
-                    "UPDATE workstreams SET session_topic=?1 WHERE id=?2",
-                    params![text, target.id],
-                )
-                .unwrap();
-            } else {
-                body[field] = json!(text);
-            }
+            body[field] = json!(text);
             let before = load(&conn, &target).unwrap().fields;
             let event_count: i64 = conn
                 .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
@@ -360,6 +352,169 @@ async fn session_intent_override_rejects_cross_line_sensitive_arguments_without_
                 event_count
             );
             assert_eq!(load(&conn, &target).unwrap().fields, before);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+#[tokio::test]
+async fn session_intent_override_preserves_rationale_after_empty_sensitive_fields() {
+    let _scope = ScopedTestDataDir::new("intent-override-empty-sensitive-fields");
+    let mut conn = db::open_db().unwrap();
+    let mut failures = Vec::new();
+    for header in ["Authorization:", "Cookie:", "token=", "Investigate token="] {
+        for newline in ["\n", "\r\n"] {
+            for field in ["session_topic", "reason"] {
+                let target = workstream(&conn, "Empty field test");
+                let mut body = json!({"targets":[target],"session_intent":"doc",
+                    "session_topic":"New topic","reason":"Correct classification"});
+                body[field] = json!(format!("{header}{newline}Correct classification"));
+                let response = handle_session_intent_preview(Bytes::from(body.to_string())).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let p: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let value = if field == "reason" {
+                    &p["reason"]
+                } else {
+                    &p["changes"][0]["after"]["session_topic"]
+                };
+                let expected = format!("{header}[REDACTED]\nCorrect classification");
+                if value != &json!(expected) {
+                    failures.push(format!("{field} {header:?} {newline:?}: {value}"));
+                    continue;
+                }
+                let applied = apply(&mut conn, apply_request(&p)).unwrap();
+                assert_eq!(applied["changes"], p["changes"]);
+                if field == "session_topic" {
+                    assert_eq!(
+                        load(&conn, &target).unwrap().fields.session_topic,
+                        Some(expected)
+                    );
+                }
+                let audits: Vec<String> = conn
+                    .prepare("SELECT detail FROM events WHERE session_id=?1 ORDER BY id")
+                    .unwrap()
+                    .query_map(
+                        [digest(p["preview_token"].as_str().unwrap().as_bytes())],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                assert_eq!(audits.len(), 2);
+                for audit in audits {
+                    let snapshot: serde_json::Value = serde_json::from_str(&audit).unwrap();
+                    assert_eq!(snapshot["reason"], p["reason"]);
+                    assert_eq!(snapshot["changes"], p["changes"]);
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+#[tokio::test]
+async fn session_intent_override_allows_replacing_and_clearing_stored_multiline_topics() {
+    let _scope = ScopedTestDataDir::new("intent-override-stored-multiline");
+    let conn = db::open_db().unwrap();
+    let workstream = workstream(&conn, "Stored multiline test");
+    let outcome = db::record_captured_event(
+        &conn,
+        &db::CaptureEventInput {
+            host: "codex-cli",
+            session_id: "stored-multiline-test",
+            project: "test",
+            cwd: None,
+            event_type: "tool_result",
+            role: Some("tool"),
+            tool_name: Some("Edit"),
+            content: "test",
+            task_kind: Some(db::ExtractionTaskKind::ObservationExtract),
+        },
+    )
+    .unwrap();
+    let session = Target {
+        kind: Kind::Session,
+        id: conn
+            .query_row(
+                "SELECT session_row_id FROM captured_events WHERE id=?1",
+                [outcome.event_row_id],
+                |row| row.get(0),
+            )
+            .unwrap(),
+    };
+    conn.execute("INSERT INTO session_summaries(memory_session_id,project,session_row_id,created_at_epoch,session_intent,session_intent_source)
+        VALUES ('stored-multiline-test','test',?1,1,'fix','summary')",[session.id]).unwrap();
+    let mut failures = Vec::new();
+    for text in [
+        "curl --oauth2-bearer\ntiny-token",
+        "curl --oauth2-bearer\r\ntiny-token",
+        "- curl\n- --oauth2-bearer\n- tiny-token",
+        "- curl\r\n- --oauth2-bearer\r\n- tiny-token",
+        "Bearer\ntiny-token",
+    ] {
+        for topic in [Some("New topic"), None] {
+            for target in [&workstream, &session] {
+                let table = match target.kind {
+                    Kind::Workstream => "workstreams",
+                    Kind::Session => "session_summaries",
+                };
+                conn.execute(
+                    &format!(
+                        "UPDATE {table} SET session_topic=?1, session_intent_source='summary'"
+                    ),
+                    [text],
+                )
+                .unwrap();
+                let body = json!({"targets":[target],"session_intent":"doc",
+                    "session_topic":topic,"reason":"Correct classification"});
+                let response = handle_session_intent_preview(Bytes::from(body.to_string())).await;
+                let status = response.status();
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let p: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if status != StatusCode::OK {
+                    failures.push(format!("{:?} {topic:?} {text:?}: {status}", target.kind));
+                    continue;
+                }
+                assert_eq!(p["changes"][0]["before"]["session_topic"], "[REDACTED]");
+                assert_eq!(p["changes"][0]["after"]["session_topic"], json!(topic));
+                assert_eq!(
+                    load(&conn, target).unwrap().fields.session_topic.as_deref(),
+                    Some(text)
+                );
+                let body = json!({"preview_token":p["preview_token"],"confirm":true});
+                let response = handle_session_intent_apply(Bytes::from(body.to_string())).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let applied: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(applied["changes"], p["changes"]);
+                assert_eq!(
+                    load(&conn, target).unwrap().fields.session_topic.as_deref(),
+                    topic
+                );
+                let audits: Vec<String> = conn
+                    .prepare("SELECT detail FROM events WHERE session_id=?1 ORDER BY id")
+                    .unwrap()
+                    .query_map(
+                        [digest(p["preview_token"].as_str().unwrap().as_bytes())],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                assert_eq!(audits.len(), 2);
+                for payload in [p.to_string(), applied.to_string()]
+                    .into_iter()
+                    .chain(audits)
+                {
+                    assert!(!payload.contains("tiny-token"));
+                    assert!(payload.contains("[REDACTED]"));
+                }
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
