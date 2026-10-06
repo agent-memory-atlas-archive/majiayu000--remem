@@ -30,6 +30,13 @@ pub(super) fn find_workstream_for_upsert(
     memory_session_id: &str,
     title: &str,
 ) -> Result<Option<WorkStreamMatch>> {
+    if !memory_session_id_maps_to_unique_content_session(conn, project, memory_session_id)? {
+        crate::log::warn(
+            "workstream",
+            &format!("session_link_collision project={project} session={memory_session_id}"),
+        );
+        return Ok(None);
+    }
     if let Some(matched) = find_linked_workstream(conn, project, memory_session_id, title)? {
         return Ok(Some(matched));
     }
@@ -154,14 +161,6 @@ fn find_linked_workstream(
     memory_session_id: &str,
     title: &str,
 ) -> Result<Option<WorkStreamMatch>> {
-    if !memory_session_id_maps_to_unique_content_session(conn, project, memory_session_id)? {
-        crate::log::warn(
-            "workstream",
-            &format!("session_link_collision project={project} session={memory_session_id}"),
-        );
-        return Ok(None);
-    }
-
     let mut stmt = conn.prepare(&format!(
         "{}
          JOIN workstream_sessions wss ON wss.workstream_id = ws.id

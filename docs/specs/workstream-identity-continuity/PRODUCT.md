@@ -125,6 +125,9 @@ measuring overlap. Ambiguous exact aliases or conservative title candidates
 abstain and create a separate workstream, preserving every existing title,
 progress, status, owner, session link and alias. The existing rename-chain
 continuity and owner/project filters remain required.
+If one memory-session ID resolves to several content sessions in the same
+project, every automatic matching path abstains; a title fallback cannot
+override that provenance collision.
 
 ### SessionStart Rendering
 
