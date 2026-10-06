@@ -299,6 +299,11 @@ fn replay_followup_bounds(
         .optional()?;
     if let Some(id) = existing {
         let member = super::replay_member::validated_replay_member(conn, id, range_id)?;
+        ensure!(
+            !matches!(member.status.as_str(), "done" | "failed")
+                || (member.lease_owner.is_none() && member.lease_expires_epoch.is_none()),
+            "terminal replay follow-up {id} still has another owner"
+        );
         Ok((Some(member.from), Some(member.resume_cursor())))
     } else {
         Ok((Some(from), cursor))

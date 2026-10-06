@@ -190,7 +190,11 @@ event chunks. Each model call budgets system instructions, prompt formatting,
 and evidence together; completion advances only through the processed chunk.
 Raw evidence remains available when per-event prompt content is clipped. Exact
 recovery retains the original range and resumes verified successful chunks
-under the explicitly selected profile and one overall timeout.
+under the explicitly selected profile and one overall timeout. Already-existing
+linked successors resume from their own original bounds and checkpoints; a
+completed primary task does not hide a failed successor. Archived exact recovery
+claims the existing family atomically, suppresses new follow-up work, and archives
+unfinished members again if the attempt fails.
 
 Workers persist fair queue and stage/project claim order, so continuing capture
 in a busy project leaves room for downstream extraction and durable jobs across

@@ -266,3 +266,38 @@ fn expired_exact_family_archives_once_and_keeps_successful_members() -> Result<(
     assert!(claim_next_extraction_task(&mut f.conn, "ordinary", 60)?.is_none());
     Ok(())
 }
+
+#[test]
+fn exact_family_failure_never_clears_another_members_replacement_owner() -> Result<()> {
+    let mut f = archived_family()?;
+    let owner = db::exact_replay_worker_owner(41, 41);
+    let replacement = db::exact_replay_worker_owner(42, 42);
+    let parent =
+        db::retry_and_claim_extraction_replay_range(&mut f.conn, f.range, true, true, &owner, 60)?;
+    f.conn.execute(
+        "UPDATE extraction_tasks SET lease_owner = ?1 WHERE id = ?2",
+        params![replacement, f.child],
+    )?;
+    let before = snapshot(&f.conn)?;
+    assert!(db::finish_claimed_exact_replay_family(&f.conn, parent.id, &owner).is_err());
+    assert_eq!(snapshot(&f.conn)?, before);
+    let lease = |conn: &Connection| -> Result<(String, Option<String>, Option<i64>, Option<i64>)> {
+        Ok(conn.query_row(
+            "SELECT status, lease_owner, lease_expires_epoch, completed_event_id
+            FROM extraction_tasks WHERE id = ?1",
+            [f.child],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?)
+    };
+    let before = lease(&f.conn)?;
+    db::archive_claimed_exact_replay_task(&f.conn, parent.id, &owner, "family ownership changed")?;
+    assert_eq!(lease(&f.conn)?, before);
+    assert_eq!(member_state(&f.conn, f.bounded)?.0, "failed");
+    assert_eq!(
+        db::get_extraction_replay_range_evidence(&f.conn, f.range)?
+            .range
+            .status,
+        "quarantined"
+    );
+    Ok(())
+}

@@ -134,6 +134,7 @@ pub(crate) async fn run_claimed_exact(
             )
         }
     };
+    drop(conn);
     for member in &mut tasks {
         member.ai_profile = Some(profile.profile_name.clone());
     }
@@ -226,12 +227,21 @@ fn archive_exact_outcome_with_class(
     failure_class: db::FailureClass,
 ) -> Result<()> {
     let conn = db::open_db()?;
-    let error = format!(
-        "attempted_task={} attempted_events={}..{}: {error}",
-        task.id,
-        task.cursor_event_id.unwrap_or(0) + 1,
-        task.high_watermark_event_id.unwrap_or(0)
-    );
+    let error =
+        if task.cursor_event_id.is_some() && task.cursor_event_id == task.high_watermark_event_id {
+            format!(
+                "task={} checkpointed_through={}; family completion failed: {error}",
+                task.id,
+                task.cursor_event_id.unwrap_or(0)
+            )
+        } else {
+            format!(
+                "attempted_task={} attempted_events={}..{}: {error}",
+                task.id,
+                task.cursor_event_id.unwrap_or(0) + 1,
+                task.high_watermark_event_id.unwrap_or(0)
+            )
+        };
     db::archive_claimed_exact_replay_task_with_class(
         &conn,
         task.id,
