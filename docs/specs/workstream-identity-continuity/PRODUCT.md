@@ -113,8 +113,6 @@ selects one candidate and there is supporting continuity evidence.
 4. Conservative title similarity fallback.
 5. Insert a new workstream only when no safe match exists.
 
-### SessionStart Rendering
-
 ### Automatic matching guard (GH-1103)
 
 Loose title search is a lookup aid and does not authorize automatic mutation.
@@ -127,6 +125,8 @@ measuring overlap. Ambiguous exact aliases or conservative title candidates
 abstain and create a separate workstream, preserving every existing title,
 progress, status, owner, session link and alias. The existing rename-chain
 continuity and owner/project filters remain required.
+
+### SessionStart Rendering
 
 SessionStart context should render canonical active workstreams only. Alias
 rows or merged duplicate rows must not appear as separate active tasks.

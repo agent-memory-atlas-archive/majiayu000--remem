@@ -102,6 +102,106 @@ fn test_no_match_creates_new() {
     assert_eq!(workstreams.len(), 2);
 }
 
+fn parsed_title(title: &str) -> ParsedWorkStream {
+    ParsedWorkStream {
+        title: Some(title.to_owned()),
+        progress: Some("original progress".into()),
+        next_action: Some("original next".into()),
+        blockers: Some("original blockers".into()),
+        is_completed: false,
+    }
+}
+
+#[test]
+fn broad_title_upsert_preserves_unrelated_workstreams_and_links() {
+    for titles in [
+        vec!["Preview animation"],
+        vec!["Billing review", "Security review"],
+    ] {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_workstream_schema(&conn);
+        let mut existing = Vec::new();
+        for (index, title) in titles.iter().enumerate() {
+            existing.push(
+                upsert_workstream(
+                    &conn,
+                    "test/proj",
+                    &format!("source-{index}"),
+                    &parsed_title(title),
+                )
+                .unwrap(),
+            );
+        }
+        // The loose public lookup remains useful, but cannot authorize mutation.
+        assert!(find_matching_workstream(&conn, "test/proj", "review")
+            .unwrap()
+            .is_some());
+        let mut new = parsed_title("review");
+        new.is_completed = true;
+        new.progress = Some("different task completed".into());
+        let outcome =
+            upsert_workstream_with_match(&conn, "test/proj", "new-session", &new).unwrap();
+        assert_eq!(outcome.match_reason, "insert");
+        assert!(!existing.contains(&outcome.id));
+        for (id, title) in existing.iter().zip(titles.iter()) {
+            let unchanged: (String, String, String, String, String, String, String) = conn.query_row(
+                "SELECT title, status, progress, next_action, blockers, owner_scope, owner_key FROM workstreams WHERE id = ?1", [id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+            ).unwrap();
+            assert_eq!(
+                unchanged,
+                (
+                    (*title).into(),
+                    "active".into(),
+                    "original progress".into(),
+                    "original next".into(),
+                    "original blockers".into(),
+                    "repo".into(),
+                    "test/proj".into()
+                )
+            );
+            let links: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workstream_sessions WHERE workstream_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let aliases: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM workstream_aliases WHERE workstream_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!((links, aliases), (1, 1));
+        }
+    }
+}
+
+#[test]
+fn ambiguous_conservative_title_match_and_alias_abstain() {
+    let conn = Connection::open_in_memory().unwrap();
+    setup_workstream_schema(&conn);
+    let first =
+        upsert_workstream(&conn, "test/proj", "one", &parsed_title("Billing review")).unwrap();
+    let second =
+        upsert_workstream(&conn, "test/proj", "two", &parsed_title("Billing export")).unwrap();
+    let ambiguous =
+        upsert_workstream_with_match(&conn, "test/proj", "three", &parsed_title("Billing"))
+            .unwrap();
+    assert_eq!(ambiguous.match_reason, "insert");
+    assert!(![first, second].contains(&ambiguous.id));
+
+    // Two exact aliases must not fall through to a weaker unique current title.
+    conn.execute("INSERT INTO workstream_aliases(workstream_id, title, normalized_title, first_seen_epoch, last_seen_epoch) VALUES (?1, 'Billing review', 'billing review', 1, 1)", [second]).unwrap();
+    let duplicated_alias =
+        upsert_workstream_with_match(&conn, "test/proj", "four", &parsed_title("Billing review"))
+            .unwrap();
+    assert_eq!(duplicated_alias.match_reason, "insert");
+    assert!(![first, second].contains(&duplicated_alias.id));
+}
+
 #[test]
 fn same_session_rename_chain_keeps_one_canonical_workstream() {
     let conn = Connection::open_in_memory().unwrap();
