@@ -2,6 +2,8 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 mod dispatch;
+#[cfg(test)]
+mod dispatch_tests;
 pub(crate) use dispatch::{
     preferred_worker_queue, record_extraction_dispatch, record_job_dispatch,
     register_ready_dispatch_groups, WorkerQueue, READY_EXTRACTION_DISPATCH_SQL,
