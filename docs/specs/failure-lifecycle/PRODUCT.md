@@ -68,6 +68,31 @@ Acceptance includes a malformed generated response followed by a valid response,
 bounded repeated malformed responses with preserved replay evidence, and a
 malformed source row that remains permanently failed without an AI retry.
 
+### Bounded captured-event extraction (Refs #1105)
+
+Observation extraction and session rollup process a contiguous prefix of their
+pending evidence, with at most 64 captured events and a 256 KiB combined prompt
+budget per model call. The budget includes the system instruction, serialized
+user prompt, and a reserved provider wrapper. A backlog is split into successive
+calls without declaring unseen events covered. Existing 24 KiB per-event content
+clipping remains explicit in the prompt and diagnostics; raw evidence is retained
+for inspection and replay. An input that cannot fit even one event fails visibly
+before a provider call.
+
+Successful chunks advance only after required persistence and follow-up effects
+have completed. Failures, exhaustion, and newly recorded replay ranges refer only
+to the attempted chunk. Later events remain processable. A replay range retains
+its original endpoints as audit evidence; a failed replay cannot skip its failed
+chunk and later report the parent range as replayed.
+
+An exact archived replay may process several chunks of the same range and profile
+under one lease and one overall timeout. Each fully successful chunk has a durable
+success checkpoint. A later explicitly authorized replay resumes that verified
+prefix; historical cursors are not treated as proof of success. Any unsuccessful
+exact attempt still returns the range to archived quarantine. Artifact writes
+retain their existing at-least-once, idempotent recovery behavior: a crash before
+the final success checkpoint may repeat a chunk, and must not skip its effects.
+
 ### Worker liveness (Refs #1105)
 
 A recent heartbeat is healthy only while the operating system confirms its

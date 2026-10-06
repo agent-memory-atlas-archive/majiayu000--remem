@@ -217,7 +217,54 @@ archived source; no pending work may retain an archived marker.
   canonical rollback while proving independently committed unrelated rows
   continue to make progress.
 
-### 2.1 Job queue persisted truth and v069 lifecycle inputs
+### 2.1 Bounded captured input and verified chunk progress (Refs #1105)
+
+`observation_extract` and `session_rollup` first select at most 64 event IDs from
+their same-host/project/session pending range, in ascending ID order. They narrow
+the in-memory attempted watermark before loading source payloads. Prompt building
+may remove only a suffix until actual system plus serialized user text plus a
+4096-byte provider-wrapper reserve fits 256 KiB. The database task's coalesced
+high watermark remains the full pending target. The attempted watermark flows to
+success, failure, defer, timeout, and exhaustion handling. A single oversized
+event/context fails before invoking the model; no whole-input truncation may
+claim unseen source IDs as completed. Per-event clipping is marked in prompt
+metadata and logged with the attempted range, without logging captured content.
+
+v094 adds nullable `extraction_tasks.completed_event_id`. It contains only the
+latest successfully persisted chunk boundary; migration leaves every historical
+row NULL because exhaustion has historically advanced `cursor_event_id` over
+failed evidence. Normal completion and exact intermediate chunk checkpoint use
+an IMMEDIATE transaction, validate processing state, expected owner and unexpired
+lease, validate the boundary against task scope and range, and update cursor and
+successful progress together. A stale worker may not overwrite a replacement
+owner. Replay checkpoints additionally require the same replay range, task kind,
+host, workspace, project, session, full target watermark, and an in-scope captured
+event. Re-enqueue inherits progress only from that range's linked, validated old
+replay task; NULL starts at the original range beginning. Failed replay tasks
+retain their last successful cursor instead of skipping a failed chunk.
+
+Required processor effects finish before the success transaction. The existing
+summary/transcript/raw-archive checkpoint still supports idempotent recovery of
+already-written rollups without rereading a missing transcript. Artifact writes,
+candidate promotion, files, and final task checkpoint are not one atomic commit;
+the contract is at-least-once. A crash in that window replays the existing
+idempotent effects. Exact replay loops chunks inside its one resolved profile,
+task-local suppression of unrelated follow-ups, original lease and overall
+timeout. It marks the parent replayed only after reaching the original endpoint;
+failure preserves original parent endpoints and records the attempted chunk in
+bounded error evidence before archived quarantine.
+
+v094 is schema-only and performs no historical cursor backfill or unrelated
+rewrite. Old inserts omit the nullable column safely. Deployments must upgrade
+all workers before relying on resumable progress; mixed-version execution and
+in-place schema downgrade are unsupported. Rollback uses a pre-upgrade database
+backup with the matching binary, or a forward fix. Dropping or fabricating the
+checkpoint to bypass recovery is not a rollback procedure. Migration tests cover
+preserved legacy rows, NULL defaults, reruns, and missing-column drift; synthetic
+DB tests cover scope/lease rejection, partial success, failed chunks, and exact
+resume without historical cursor inference.
+
+### 2.2 Job queue persisted truth and v069 lifecycle inputs
 
 Lease-owned done, retry, exhausted, and permanent-failure transitions use the
 current processing row, expected owner, and unexpired lease as a single
@@ -353,7 +400,7 @@ reviving the old queue or creating an upgrade-time retry storm.
   exact lease. A held daemon lock, future retry time, or identity race fails
   before fallback. The exact processor uses the validated in-memory profile
   for its single attempt. Full-range done follows the normal success
-  transition; partial coverage, defer, wait, timeout, provider error, or
+  transition after all bounded chunks; defer, wait, timeout, provider error, or
   another non-success atomically leaves the
   replay task failed/archived and the range quarantined/archived. Expired lease
   recovery recognizes exact-replay owners and applies the same archived

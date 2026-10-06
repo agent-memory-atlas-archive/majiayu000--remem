@@ -185,6 +185,13 @@ backoff while keeping the same source evidence. Invalid stored evidence still
 requires repair; exhausted model attempts preserve raw capture and replay
 ranges for inspection instead of accepting incomplete output.
 
+Observation extraction and session rollup split large backlogs into bounded
+event chunks. Each model call budgets system instructions, prompt formatting,
+and evidence together; completion advances only through the processed chunk.
+Raw evidence remains available when per-event prompt content is clipped. Exact
+recovery retains the original range and resumes verified successful chunks
+under the explicitly selected profile and one overall timeout.
+
 Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
 dropped or routed to review with a diagnosable reason.
