@@ -45,7 +45,7 @@ bounded activity statistics, and explicit exact-tuple projection in schema 84.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/stats` | Product stats for local dashboards. |
+| GET | `/api/v1/stats` | Product stats for local dashboards, including known AI cost and explicit usage/pricing coverage. |
 | GET | `/api/v1/candidates?project=&status=&type=&block_reason=&topic_key=&contains=&min_confidence=&older_than_days=&limit=&offset=` | Compact memory-candidate list with review filters. |
 | GET | `/api/v1/candidates/blocked?project=` | Pending candidate block-reason aggregates with examples. |
 | GET | `/api/v1/candidates/{id}` | Safe candidate detail, evidence projection, and review decision. |
@@ -199,6 +199,52 @@ cache metadata. The default cache TTL is 2 seconds:
 refresh fails but a bounded stale payload is still available, the response is
 HTTP 200 with `cache.stale=true` and a `warnings` array. Without an acceptable
 stale payload, status returns the existing structured error response.
+
+### AI usage and cost coverage
+
+Source version `0.6.103` adds `ai_cost_complete` and `ai_usage_coverage` to
+`GET /api/v1/stats`. Existing `ai_calls`, `ai_total_tokens`, and `ai_cost_usd`
+fields retain their types. The cost is the known priced portion of recorded
+attempts; a numeric zero alone does not establish that no tokens were used or
+that no cost was incurred. The endpoint covers the entire local ledger and
+does not accept a project or time filter.
+
+```json
+{
+  "ai_calls": 2,
+  "ai_total_tokens": 280,
+  "ai_cost_usd": 0.123,
+  "ai_cost_complete": false,
+  "ai_usage_coverage": {
+    "complete_calls": 2,
+    "partial_calls": 0,
+    "missing_calls": 0,
+    "invalid_calls": 0,
+    "estimated_calls": 0,
+    "legacy_unverified_calls": 0,
+    "failed_calls": 0,
+    "unpriced_calls": 1,
+    "cost_incomplete_calls": 1
+  }
+}
+```
+
+The six usage-state counts are mutually exclusive and sum to `ai_calls`.
+`failed_calls` counts failed attempts independently of whether their usage is
+complete. `unpriced_calls` identifies attempts whose pricing is absent or
+invalid. `cost_incomplete_calls` also includes partial, missing, invalid,
+estimated, or historically unverified cost evidence. `ai_cost_complete` is
+true exactly when that last count is zero, including an empty ledger.
+Usage completeness and cost completeness are separate: complete token counts
+for an unknown model still produce an unpriced call. Pre-v096 rows preserve
+their prior numeric cost and remain `legacy_unverified`; migration does not
+invent complete observations for them.
+
+Clients should detect these additive fields before showing completeness and
+label `ai_cost_usd` as the known priced portion when `ai_cost_complete` is
+false or unavailable. This source contract is staged until its release is
+published. Pricing and per-attempt evidence rules are defined in
+[`pricing-config/TECH.md`](pricing-config/TECH.md).
 
 List endpoints return:
 
