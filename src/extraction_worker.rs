@@ -12,6 +12,8 @@ tokio::task_local! {
 
 const DEPENDENCY_WAIT_RETRY_SECS: i64 = 300;
 
+mod diagnostics;
+
 #[cfg(test)]
 mod bounded_tests;
 
@@ -65,15 +67,7 @@ pub(crate) async fn run_next(
         Ok(Ok(ExtractionTaskOutcome::Deferred(msg))) => {
             let backoff = retry_backoff_secs(task.attempts);
             db::defer_claimed_extraction_task(&conn, &task, lease_owner, &msg, backoff)?;
-            crate::log::warn(
-                "worker",
-                &format!(
-                    "extraction id={} deferred: {} (retry in {}s)",
-                    task.id,
-                    crate::db::truncate_str(&msg, 300),
-                    backoff
-                ),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
         Ok(Ok(ExtractionTaskOutcome::Waiting(msg))) => {
             db::wait_extraction_task(
@@ -103,15 +97,7 @@ pub(crate) async fn run_next(
                 &e,
                 backoff,
             )?;
-            crate::log::warn(
-                "worker",
-                &format!(
-                    "extraction id={} failed: {} (retry in {}s)",
-                    task.id,
-                    crate::db::truncate_str(&msg, 300),
-                    backoff
-                ),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
         Err(_) => {
             let msg = format!("extraction task timed out after {}s", timeout_secs);
@@ -123,10 +109,7 @@ pub(crate) async fn run_next(
                 &msg,
                 backoff,
             )?;
-            crate::log::warn(
-                "worker",
-                &format!("extraction id={} timeout (retry in {}s)", task.id, backoff),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
     }
 
