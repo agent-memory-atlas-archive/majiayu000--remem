@@ -99,7 +99,7 @@ pub(super) fn build_rollup_prompt(
             };
             content.clone()
         } else {
-            let redacted_content = crate::adapter::common::redact_sensitive_text(&event.content);
+            let redacted_content = redacted_event_content(event);
             db::truncate_str(&redacted_content, EVENT_CONTENT_LIMIT).to_string()
         };
         let gap_before = previous_epoch.map(|epoch| (event.created_at_epoch - epoch).max(0));
@@ -144,6 +144,10 @@ fn is_codex_transcript_message_event(event: &super::RollupEvent) -> bool {
             == Some(crate::memory::raw_transcript::CODEX_TRANSCRIPT_MESSAGE_TOOL)
 }
 
+fn redacted_event_content(event: &super::RollupEvent) -> String {
+    crate::adapter::common::redact_sensitive_text(&event.content)
+}
+
 pub(super) fn truncated_event_ids(range: &RollupRange) -> Vec<i64> {
     range
         .events
@@ -154,8 +158,7 @@ pub(super) fn truncated_event_ids(range: &RollupRange) -> Vec<i64> {
             } else {
                 EVENT_CONTENT_LIMIT
             };
-            (crate::adapter::common::redact_sensitive_text(&event.content).len() > limit)
-                .then_some(event.id)
+            (redacted_event_content(event).len() > limit).then_some(event.id)
         })
         .collect()
 }
@@ -181,7 +184,7 @@ pub(super) fn captured_transcript_events_fit(
         .iter()
         .filter(|event| is_codex_transcript_message_event(event))
         .all(|event| {
-            let redacted = crate::adapter::common::redact_sensitive_text(&event.content);
+            let redacted = redacted_event_content(event);
             let expected =
                 db::truncate_str(redacted.trim(), TRANSCRIPT_MESSAGE_CONTENT_LIMIT).trim_end();
             expected.is_empty()
@@ -211,7 +214,7 @@ fn bounded_transcript_event_content(
             bounded.truncated = true;
             continue;
         }
-        let redacted = crate::adapter::common::redact_sensitive_text(&event.content);
+        let redacted = redacted_event_content(event);
         let redacted = redacted.trim();
         if redacted.is_empty() {
             continue;
