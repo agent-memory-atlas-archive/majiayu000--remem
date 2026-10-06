@@ -159,7 +159,7 @@ file is referenced.
 
 | Layer | Primary roots | May depend on |
 |---|---|---|
-| Foundation/domain | Roots `atomic_file`, `build_info`, `git_util`, `identity`, `log`, `perf`, `project_alias`, `project_id`, `runtime_config` | Standard/library utilities and other foundation roots |
+| Foundation/domain | Roots `atomic_file`, `build_info`, `git_util`, `host_roots`, `identity`, `log`, `perf`, `project_alias`, `project_id`, `runtime_config` | Standard/library utilities and other foundation roots |
 | Storage | Roots `captured_git`, `db`, `git_evidence`, `git_trace`, `migrate`, `spill_queue`, plus `src/migrations/**` | Foundation/domain |
 | Memory/retrieval | Roots `graph_candidate`, `memory`, `memory_candidate`, `retrieval`, `rules`, `truth`, `user_context`, `workstream` | Foundation/domain and storage |
 | Application | Roots `ai`, `context`, `context_bundle`, `dream`, `extraction_worker`, `ingest`, `maintenance`, `observation_extract`, `retrieval_router`, `session_activity`, `session_rollup`, `summarize`, `timeline`, `worker` | Foundation/domain, storage, memory/retrieval |
