@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::db::extraction_replay::{mark_replay_range_failed, mark_replay_range_replayed_if_done};
+use crate::db::extraction_replay::mark_replay_range_failed;
 
 use super::exhaust::exhaust_extraction_task;
 use super::loaders::{ensure_task_updated, load_claimed_extraction_task};
@@ -210,37 +210,6 @@ fn archive_claimed_exact_replay_task_in_transaction(
         failure_class,
         now,
     )
-}
-
-pub fn mark_extraction_task_done(
-    conn: &Connection,
-    task_id: i64,
-    lease_owner: &str,
-    completed_high_watermark_event_id: Option<i64>,
-) -> Result<()> {
-    let now = chrono::Utc::now().timestamp();
-    let updated = conn.execute(
-        "UPDATE extraction_tasks
-         SET status = CASE
-                 WHEN ?4 IS NOT NULL
-                  AND high_watermark_event_id IS NOT NULL
-                  AND high_watermark_event_id > ?4 THEN 'pending'
-                 ELSE 'done'
-             END,
-             cursor_event_id = ?4,
-             lease_owner = NULL,
-             lease_expires_epoch = NULL,
-             next_retry_epoch = NULL,
-             last_error = NULL,
-             failure_class = NULL,
-             failed_at_epoch = NULL,
-             archived_at_epoch = NULL,
-             updated_at_epoch = ?1
-         WHERE id = ?2 AND lease_owner = ?3 AND status = 'processing'",
-        params![now, task_id, lease_owner, completed_high_watermark_event_id],
-    )?;
-    ensure_task_updated(updated, task_id)?;
-    mark_replay_range_replayed_if_done(conn, task_id, now)
 }
 
 pub fn mark_extraction_task_failed(

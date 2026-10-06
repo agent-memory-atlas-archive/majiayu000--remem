@@ -21,6 +21,9 @@ pub(super) fn build_extract_prompt(task: &db::ExtractionTask, range: &EvidenceRa
         },
         "extraction_run_date": extraction_run_date(range),
         "per_event_content_budget_bytes": EXTRACT_PROMPT_EVENT_CONTENT_BUDGET_BYTES,
+        "max_input_bytes": db::EXTRACTION_INPUT_MAX_BYTES,
+        "max_captured_events": db::CAPTURED_EVENT_BATCH_LIMIT,
+        "provider_wrapper_reserve_bytes": db::EXTRACTION_WRAPPER_RESERVE_BYTES,
         "content_truncated_event_ids": truncated_events,
         "rolling_session_summary": summary_context_json(range.summary_context.as_ref()),
         "recent_context": recent_context_events(range),
@@ -107,6 +110,18 @@ fn prompt_transcript_events(range: &EvidenceRange) -> (Vec<serde_json::Value>, V
         })
         .collect::<Vec<_>>();
     (events, truncated_event_ids)
+}
+
+pub(super) fn truncated_event_ids(range: &EvidenceRange) -> Vec<i64> {
+    range
+        .events
+        .iter()
+        .filter_map(|event| {
+            (redact_extract_content(&event.content).len()
+                > EXTRACT_PROMPT_EVENT_CONTENT_BUDGET_BYTES)
+                .then_some(event.id)
+        })
+        .collect()
 }
 
 fn recent_context_events(range: &EvidenceRange) -> Vec<serde_json::Value> {

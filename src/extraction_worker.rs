@@ -1,3 +1,5 @@
+use std::ops::AsyncFnMut;
+
 use anyhow::Result;
 use tokio::time::Duration;
 
@@ -9,6 +11,9 @@ tokio::task_local! {
 }
 
 const DEPENDENCY_WAIT_RETRY_SECS: i64 = 300;
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ExtractionTaskOutcome {
@@ -25,7 +30,7 @@ pub(crate) async fn run_next(
     timeout_secs: u64,
 ) -> Result<bool> {
     let mut conn = db::open_db()?;
-    let Some(task) = db::claim_next_extraction_task(&mut conn, lease_owner, lease_secs)? else {
+    let Some(mut task) = db::claim_next_extraction_task(&mut conn, lease_owner, lease_secs)? else {
         return Ok(false);
     };
 
@@ -43,7 +48,7 @@ pub(crate) async fn run_next(
 
     let timed = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        process_extraction_task(&task),
+        process_extraction_task(&mut task),
     )
     .await;
     let conn = db::open_db()?;
@@ -53,7 +58,7 @@ pub(crate) async fn run_next(
                 &conn,
                 task.id,
                 lease_owner,
-                to_event_id.or(task.high_watermark_event_id),
+                completed_boundary(&task, to_event_id)?,
             )?;
             crate::log::info("worker", &format!("done extraction id={}", task.id));
         }
@@ -151,22 +156,12 @@ pub(crate) async fn run_claimed_exact(
 
     let process = crate::ai::with_resolved_profile(
         profile.clone(),
-        EXACT_REPLAY_TASK.scope((), process_extraction_task(&task)),
+        EXACT_REPLAY_TASK.scope((), process_exact_chunks(&mut task, lease_owner)),
     );
     let timed = tokio::time::timeout(Duration::from_secs(timeout_secs), process).await;
     match timed {
         Ok(Ok(ExtractionTaskOutcome::Done { to_event_id })) => {
-            let completed = to_event_id.or(task.high_watermark_event_id);
-            if task
-                .high_watermark_event_id
-                .is_some_and(|high_watermark| completed != Some(high_watermark))
-            {
-                return archive_exact_outcome(
-                    &task,
-                    lease_owner,
-                    "exact replay processed only part of the bounded event range",
-                );
-            }
+            let completed = completed_boundary(&task, to_event_id)?;
             let conn = db::open_db()?;
             db::mark_extraction_task_done(&conn, task.id, lease_owner, completed)?;
             crate::log::info(
@@ -217,11 +212,16 @@ fn archive_exact_outcome_with_class(
     failure_class: db::FailureClass,
 ) -> Result<()> {
     let conn = db::open_db()?;
+    let error = format!(
+        "attempted_events={}..{}: {error}",
+        task.cursor_event_id.unwrap_or(0) + 1,
+        task.high_watermark_event_id.unwrap_or(0)
+    );
     db::archive_claimed_exact_replay_task_with_class(
         &conn,
         task.id,
         lease_owner,
-        error,
+        &error,
         failure_class,
     )?;
     crate::log::error(
@@ -232,13 +232,13 @@ fn archive_exact_outcome_with_class(
             task.replay_range_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "<none>".to_string()),
-            crate::db::truncate_str(error, 300)
+            crate::db::truncate_str(&error, 300)
         ),
     );
     anyhow::bail!("{error}")
 }
 
-async fn process_extraction_task(task: &db::ExtractionTask) -> Result<ExtractionTaskOutcome> {
+async fn process_extraction_task(task: &mut db::ExtractionTask) -> Result<ExtractionTaskOutcome> {
     match task.task_kind {
         db::ExtractionTaskKind::CapturedGitLink => {
             let mut conn = db::open_db()?;
@@ -269,6 +269,65 @@ async fn process_extraction_task(task: &db::ExtractionTask) -> Result<Extraction
             "extraction task kind '{}' is not implemented",
             task.task_kind.as_str()
         ))),
+    }
+}
+
+fn completed_boundary(task: &db::ExtractionTask, completed: Option<i64>) -> Result<Option<i64>> {
+    let completed = completed.or(task.high_watermark_event_id);
+    anyhow::ensure!(
+        completed.is_none_or(
+            |end| task.high_watermark_event_id.is_some_and(|high| end <= high)
+                && end >= task.cursor_event_id.unwrap_or(0)
+        ),
+        "extraction completion exceeds its attempted evidence range"
+    );
+    Ok(completed)
+}
+
+async fn process_exact_chunks(
+    task: &mut db::ExtractionTask,
+    lease_owner: &str,
+) -> Result<ExtractionTaskOutcome> {
+    process_exact_chunks_with(task, process_extraction_task, |task, end| {
+        db::checkpoint_claimed_extraction_task_chunk(&db::open_db()?, task, lease_owner, end)
+    })
+    .await
+}
+
+// One future covers the entire exact attempt. Its caller owns the sole timeout,
+// profile and lease; each committed checkpoint lets explicit recovery resume.
+async fn process_exact_chunks_with(
+    task: &mut db::ExtractionTask,
+    mut process: impl AsyncFnMut(&mut db::ExtractionTask) -> Result<ExtractionTaskOutcome>,
+    mut checkpoint: impl FnMut(&db::ExtractionTask, i64) -> Result<()>,
+) -> Result<ExtractionTaskOutcome> {
+    let target = task.high_watermark_event_id;
+    loop {
+        task.high_watermark_event_id = target;
+        if target.is_some_and(|high| task.cursor_event_id == Some(high)) {
+            return Ok(ExtractionTaskOutcome::Done {
+                to_event_id: target,
+            });
+        }
+        let outcome = process(task).await?;
+        let ExtractionTaskOutcome::Done { to_event_id } = outcome else {
+            return Ok(outcome);
+        };
+        let completed = completed_boundary(task, to_event_id)?;
+        if completed == target {
+            return Ok(ExtractionTaskOutcome::Done {
+                to_event_id: completed,
+            });
+        }
+        let end =
+            completed.ok_or_else(|| anyhow::anyhow!("exact replay made no evidence progress"))?;
+        anyhow::ensure!(
+            end > task.cursor_event_id.unwrap_or(0),
+            "exact replay made no evidence progress"
+        );
+        checkpoint(task, end)?;
+        task.cursor_event_id = Some(end);
+        task.attempts = 0;
     }
 }
 

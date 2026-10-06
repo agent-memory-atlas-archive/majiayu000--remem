@@ -87,15 +87,19 @@ fn load_task_ai_profile(
            AND (?4 IS NULL OR e.id <= ?4)
          ORDER BY e.id DESC",
     )?;
-    let contents = stmt
-        .query_map(
-            params![host_id, project_id, session_row_id, high_watermark_event_id],
-            |row| row.get::<_, String>(0),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(contents
-        .iter()
-        .find_map(|content| crate::runtime_config::profile_from_payload_text(content)))
+    let mut rows = stmt.query(params![
+        host_id,
+        project_id,
+        session_row_id,
+        high_watermark_event_id
+    ])?;
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(0)?;
+        if let Some(profile) = crate::runtime_config::profile_from_payload_text(&content) {
+            return Ok(Some(profile));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn ensure_task_updated(updated: usize, task_id: i64) -> Result<()> {

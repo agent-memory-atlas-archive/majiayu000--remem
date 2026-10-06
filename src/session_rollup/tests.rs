@@ -5,6 +5,7 @@ use crate::db::{record_captured_event, CaptureEventInput, ExtractionTaskKind};
 
 use super::*;
 
+mod bounded_input;
 mod citation_evidence;
 mod followup_scheduling;
 mod native_memory;

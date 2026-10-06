@@ -220,7 +220,7 @@ async fn run_observation_and_candidate_tasks(
     task: &MemoryBenchTask,
     poisoning_expected: bool,
 ) -> Result<()> {
-    let observation_task = crate::db::claim_next_extraction_task(conn, LEASE_OWNER, 60)?
+    let mut observation_task = crate::db::claim_next_extraction_task(conn, LEASE_OWNER, 60)?
         .context("production-path benchmark expected observation extraction task")?;
     anyhow::ensure!(
         observation_task.task_kind == crate::db::ExtractionTaskKind::ObservationExtract,
@@ -228,9 +228,9 @@ async fn run_observation_and_candidate_tasks(
         observation_task.task_kind.as_str()
     );
     let extraction_response = deterministic_observation_response(task, poisoning_expected);
-    let observation_result = crate::observation_extract::process_with_extractor(
+    let observation_result = crate::observation_extract::process_with_extractor_in_range(
         conn,
-        &observation_task,
+        &mut observation_task,
         |_prompt| async move { Ok(extraction_response) },
     )
     .await?;

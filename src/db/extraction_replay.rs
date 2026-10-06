@@ -336,24 +336,26 @@ pub(crate) fn enqueue_replay_extraction_task(
     let session_row_id = session_row_id.ok_or_else(|| {
         anyhow::anyhow!("extraction replay range {range_id} is missing session_row_id")
     })?;
+    let completed_event_id = crate::db::replay_resume_event_id(conn, range_id)?;
     let task_kind_value = ExtractionTaskKind::from_db(&task_kind)?;
     let now = chrono::Utc::now().timestamp();
     let idempotency_key =
         format!("{host_id}:{project_id}:{session_row_id}:{task_kind}:replay-range:{range_id}");
-    conn.execute(
+    let updated = conn.execute(
         "INSERT INTO extraction_tasks
          (task_kind, host_id, workspace_id, project_id, session_row_id, priority, status,
           idempotency_key, cursor_event_id, high_watermark_event_id, attempts,
           next_retry_epoch, lease_owner, lease_expires_epoch, last_error, created_at_epoch,
-          updated_at_epoch, replay_range_id)
+          updated_at_epoch, replay_range_id, completed_event_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, 0, NULL, NULL, NULL, NULL,
-                 ?10, ?10, ?11)
+                 ?10, ?10, ?11, ?12)
          ON CONFLICT(idempotency_key) DO UPDATE SET
              status = CASE
                  WHEN extraction_tasks.status IN ('done', 'failed') THEN 'pending'
                  ELSE extraction_tasks.status
              END,
              cursor_event_id = excluded.cursor_event_id,
+             completed_event_id = excluded.completed_event_id,
              high_watermark_event_id = excluded.high_watermark_event_id,
              attempts = CASE
                  WHEN extraction_tasks.status IN ('done', 'failed') THEN 0
@@ -380,7 +382,14 @@ pub(crate) fn enqueue_replay_extraction_task(
                  ELSE extraction_tasks.archived_at_epoch
              END,
              replay_range_id = excluded.replay_range_id,
-             updated_at_epoch = excluded.updated_at_epoch",
+             updated_at_epoch = excluded.updated_at_epoch
+         WHERE extraction_tasks.status IN ('done', 'failed')
+           AND extraction_tasks.task_kind = excluded.task_kind
+           AND extraction_tasks.host_id = excluded.host_id
+           AND extraction_tasks.workspace_id = excluded.workspace_id
+           AND extraction_tasks.project_id = excluded.project_id
+           AND extraction_tasks.session_row_id IS excluded.session_row_id
+           AND extraction_tasks.replay_range_id = excluded.replay_range_id",
         params![
             task_kind,
             host_id,
@@ -389,12 +398,17 @@ pub(crate) fn enqueue_replay_extraction_task(
             session_row_id,
             task_kind_value.priority(),
             idempotency_key,
-            from_event_id - 1,
+            completed_event_id.unwrap_or(from_event_id - 1),
             to_event_id,
             now,
-            range_id
+            range_id,
+            completed_event_id
         ],
     )?;
+    ensure!(
+        updated == 1,
+        "extraction replay range {range_id} task identity changed"
+    );
     let replay_task_id: i64 = conn.query_row(
         "SELECT id FROM extraction_tasks WHERE idempotency_key = ?1",
         params![idempotency_key],

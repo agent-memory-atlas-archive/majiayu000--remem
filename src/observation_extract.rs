@@ -115,11 +115,13 @@ pub(crate) fn build_eval_extract_request(
     )
 }
 
-pub(crate) async fn process(task: &db::ExtractionTask) -> Result<ObservationExtractResult> {
+pub(crate) async fn process(task: &mut db::ExtractionTask) -> Result<ObservationExtractResult> {
     let mut conn = db::open_db()?;
     let project = task.project.clone();
     let ai_profile = task.ai_profile.clone();
-    process_with_extractor(&mut conn, task, move |prompt| {
+    let session_id = task.session_id.clone();
+    let host = task.host.clone();
+    process_with_extractor_in_range(&mut conn, task, move |prompt| {
         let project = project.clone();
         let ai_profile = ai_profile.clone();
         async move {
@@ -129,9 +131,9 @@ pub(crate) async fn process(task: &db::ExtractionTask) -> Result<ObservationExtr
                 &prompt,
                 crate::ai::UsageContext {
                     project: Some(project.as_str()),
-                    session_id: task.session_id.as_deref(),
+                    session_id: session_id.as_deref(),
                     operation: "observation_extract",
-                    host: profile.is_none().then_some(task.host.as_str()),
+                    host: profile.is_none().then_some(host.as_str()),
                     profile,
                 },
             )
@@ -141,6 +143,7 @@ pub(crate) async fn process(task: &db::ExtractionTask) -> Result<ObservationExtr
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn process_with_extractor<F, Fut>(
     conn: &mut Connection,
     task: &db::ExtractionTask,
@@ -150,12 +153,46 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<String>>,
 {
-    let Some(range) = load_evidence_range(conn, task)? else {
+    process_with_extractor_in_range(conn, &mut task.clone(), extract).await
+}
+
+pub(crate) async fn process_with_extractor_in_range<F, Fut>(
+    conn: &mut Connection,
+    task: &mut db::ExtractionTask,
+    extract: F,
+) -> Result<ObservationExtractResult>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<String>>,
+{
+    db::bound_captured_event_attempt(conn, task)?;
+    let Some(mut range) = load_evidence_range(conn, task)? else {
         return Ok(ObservationExtractResult::EmptyRange);
     };
+    let prompt = loop {
+        task.high_watermark_event_id = Some(range.to_event_id);
+        let prompt = build_extract_prompt(task, &range);
+        if db::extraction_prompt_fits(OBSERVATION_EXTRACT_SYSTEM, &prompt) {
+            break prompt;
+        }
+        anyhow::ensure!(
+            range.events.len() > 1,
+            "extraction input {} bytes exceeds {} bytes for event {}; raw evidence retained",
+            db::extraction_input_bytes(OBSERVATION_EXTRACT_SYSTEM, &prompt),
+            db::EXTRACTION_INPUT_MAX_BYTES,
+            range.from_event_id
+        );
+        range.events.pop();
+        range.event_ids.pop();
+        range.to_event_id = range.events.last().expect("one event retained").id;
+    };
+    db::log_extraction_input(
+        task,
+        OBSERVATION_EXTRACT_SYSTEM,
+        &prompt,
+        &prompt::truncated_event_ids(&range),
+    );
     let captured_commits = crate::captured_git::link_task_range(conn, task)?;
-
-    let prompt = build_extract_prompt(task, &range);
     let response = extract(prompt).await?;
     let observations = match parse_observation_extract_response(&response)
         .map_err(|error| db::model_output_error(task.task_kind, error))?

@@ -245,7 +245,9 @@ retain their last successful cursor instead of skipping a failed chunk.
 
 Required processor effects finish before the success transaction. The existing
 summary/transcript/raw-archive checkpoint still supports idempotent recovery of
-already-written rollups without rereading a missing transcript. Artifact writes,
+already-written rollups without rereading a missing transcript. A legacy persisted
+rollup larger than the new input limit recovers its existing checkpoint without a
+new model call. Only new generation is split into the bounded prefix. Artifact writes,
 candidate promotion, files, and final task checkpoint are not one atomic commit;
 the contract is at-least-once. A crash in that window replays the existing
 idempotent effects. Exact replay loops chunks inside its one resolved profile,

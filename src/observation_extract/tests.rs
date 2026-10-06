@@ -1,3 +1,4 @@
+mod bounded_input;
 mod generated_output;
 
 use anyhow::Context;

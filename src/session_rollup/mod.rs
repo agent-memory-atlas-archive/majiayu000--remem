@@ -59,11 +59,13 @@ pub(super) struct RollupRange {
     pub(super) events: Vec<RollupEvent>,
 }
 
-pub(crate) async fn process(task: &db::ExtractionTask) -> Result<SessionRollupResult> {
+pub(crate) async fn process(task: &mut db::ExtractionTask) -> Result<SessionRollupResult> {
     let mut conn = db::open_db()?;
     let project = task.project.clone();
     let ai_profile = task.ai_profile.clone();
-    process_with_summarizer(&mut conn, task, move |prompt| {
+    let session_id = task.session_id.clone();
+    let host = task.host.clone();
+    process_with_summarizer_in_range(&mut conn, task, move |prompt| {
         let project = project.clone();
         let ai_profile = ai_profile.clone();
         async move {
@@ -73,9 +75,9 @@ pub(crate) async fn process(task: &db::ExtractionTask) -> Result<SessionRollupRe
                 &prompt,
                 crate::ai::UsageContext {
                     project: Some(project.as_str()),
-                    session_id: task.session_id.as_deref(),
+                    session_id: session_id.as_deref(),
                     operation: "session_rollup",
-                    host: profile.is_none().then_some(task.host.as_str()),
+                    host: profile.is_none().then_some(host.as_str()),
                     profile,
                 },
             )
@@ -85,6 +87,7 @@ pub(crate) async fn process(task: &db::ExtractionTask) -> Result<SessionRollupRe
     .await
 }
 
+#[cfg(test)]
 async fn process_with_summarizer<F, Fut>(
     conn: &mut Connection,
     task: &db::ExtractionTask,
@@ -94,11 +97,31 @@ where
     F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<String>>,
 {
-    let Some(range) = load_rollup_range(conn, task)? else {
+    process_with_summarizer_in_range(conn, &mut task.clone(), summarize).await
+}
+
+async fn process_with_summarizer_in_range<F, Fut>(
+    conn: &mut Connection,
+    task: &mut db::ExtractionTask,
+    summarize: F,
+) -> Result<SessionRollupResult>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<String>>,
+{
+    // Recover the already-generated checkpoint before reading a transcript
+    // source that may since have disappeared. Legacy summaries may be larger
+    // than a new prompt chunk; they are replayed without another model call.
+    if let Some(end) = persist::persisted_rollup_prefix_end(conn, task)? {
+        task.high_watermark_event_id = Some(end);
+    } else {
+        db::bound_captured_event_attempt(conn, task)?;
+    }
+    let Some(mut range) = load_rollup_range(conn, task)? else {
         return Ok(SessionRollupResult::EmptyRange);
     };
-    crate::captured_git::link_task_range(conn, task)?;
     if let Some(persisted) = persist::load_persisted_rollup_state(conn, task, &range)? {
+        crate::captured_git::link_task_range(conn, task)?;
         let raw_archive_result = complete_raw_archive_for_existing_rollup(
             conn,
             task,
@@ -129,9 +152,29 @@ where
         return Ok(SessionRollupResult::AlreadyExists);
     }
 
+    let (prompt, transcript_evidence) = loop {
+        task.high_watermark_event_id = Some(range.to_event_id);
+        let transcript = transcript_evidence::load_prompt_transcript_evidence(&range)?;
+        let prompt = prompt::build_rollup_prompt(task, &range, &transcript);
+        if db::extraction_prompt_fits(SESSION_ROLLUP_SYSTEM, &prompt)
+            && prompt::captured_transcript_events_fit(&range, &transcript)
+        {
+            break (prompt, transcript);
+        }
+        anyhow::ensure!(range.events.len() > 1,
+            "extraction input exceeds {} bytes or captured transcript budget for event {}; raw evidence retained",
+            db::EXTRACTION_INPUT_MAX_BYTES, range.from_event_id);
+        range.events.pop();
+        range.to_event_id = range.events.last().expect("one event retained").id;
+    };
+    db::log_extraction_input(
+        task,
+        SESSION_ROLLUP_SYSTEM,
+        &prompt,
+        &prompt::truncated_event_ids(&range),
+    );
+    crate::captured_git::link_task_range(conn, task)?;
     let raw_archive_result = side_effects::drain_raw_archive_from_range(conn, task, &range);
-    let transcript_evidence = transcript_evidence::load_prompt_transcript_evidence(&range)?;
-    let prompt = prompt::build_rollup_prompt(task, &range, &transcript_evidence);
     let response = summarize(prompt).await?;
     let output = parse::parse_rollup_response(&response, &range)
         .map_err(|error| db::model_output_error(task.task_kind, error))?;
