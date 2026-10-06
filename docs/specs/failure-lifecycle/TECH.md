@@ -239,7 +239,13 @@ lease, validate the boundary against task scope and range, and update cursor and
 successful progress together. A stale worker may not overwrite a replacement
 owner. Replay checkpoints additionally require the same replay range, task kind,
 host, workspace, project, session, full target watermark, and an in-scope captured
-event. Re-enqueue inherits progress only from that range's linked, validated old
+event. These canonical restrictions apply to resumable primary/exact progress;
+ordinary replay-linked follow-ups may have a different kind and a smaller
+contained range. Their completion validates the same host/workspace/project/
+session, contained cursor/target and captured boundary. A failed parent range
+may accept completion of already-leased effects but cannot become replayed until
+an explicit recovery requeues it and all linked work is done.
+Re-enqueue inherits progress only from that range's linked, validated old
 replay task; NULL starts at the original range beginning. Failed replay tasks
 retain their last successful cursor instead of skipping a failed chunk.
 

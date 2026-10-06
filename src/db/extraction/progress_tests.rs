@@ -202,3 +202,30 @@ fn replay_never_infers_success_from_legacy_cursor_and_rejects_foreign_checkpoint
     assert!(replay_resume_event_id(&conn, range).is_err());
     Ok(())
 }
+
+#[test]
+fn replay_bounded_followup_completes_without_claiming_canonical_progress() -> Result<()> {
+    let mut conn = setup()?;
+    let (range, events) = replay_fixture(&mut conn)?;
+    db::retry_extraction_replay_range(&conn, range, false)?;
+    let parent = claim_next_extraction_task(&mut conn, "parent", 60)?.unwrap();
+    let child_id = enqueue_bounded_followup_extraction_task(
+        &conn,
+        &parent,
+        ExtractionTaskKind::UserContextCandidate,
+        events[0] - 1,
+        events[1],
+    )?;
+    let child = db::claim_extraction_task_by_id(&mut conn, child_id, "child", 60)?.unwrap();
+    mark_extraction_task_done(&conn, child.id, "child", Some(events[1]))?;
+    assert_eq!(progress(&conn, child.id)?.0, "done");
+    assert_eq!(replay_resume_event_id(&conn, range)?, None);
+    mark_extraction_task_done(&conn, parent.id, "parent", Some(events[2]))?;
+    assert_eq!(
+        db::get_extraction_replay_range_evidence(&conn, range)?
+            .range
+            .status,
+        "replayed"
+    );
+    Ok(())
+}

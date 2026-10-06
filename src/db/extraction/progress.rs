@@ -20,6 +20,7 @@ pub fn mark_extraction_task_done(
         lease_owner,
         completed_high_watermark_event_id,
         now,
+        crate::db::is_exact_replay_worker_owner(lease_owner),
     )?;
     let updated = tx.execute(
         "UPDATE extraction_tasks
@@ -60,7 +61,14 @@ pub(crate) fn checkpoint_claimed_extraction_task_chunk(
     );
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let now = chrono::Utc::now().timestamp();
-    validate_completion(&tx, task.id, lease_owner, Some(completed_event_id), now)?;
+    validate_completion(
+        &tx,
+        task.id,
+        lease_owner,
+        Some(completed_event_id),
+        now,
+        true,
+    )?;
     let updated = tx.execute(
         "UPDATE extraction_tasks
          SET cursor_event_id = ?1, completed_event_id = ?1, attempts = 0,
@@ -95,6 +103,7 @@ fn validate_completion(
     lease_owner: &str,
     completed: Option<i64>,
     now: i64,
+    exact_canonical: bool,
 ) -> Result<()> {
     let valid = conn
         .query_row(
@@ -107,17 +116,19 @@ fn validate_completion(
                      AND e.project_id = t.project_id AND e.session_row_id IS t.session_row_id)
                AND (t.replay_range_id IS NULL OR EXISTS (
                    SELECT 1 FROM extraction_replay_ranges r
-                   WHERE r.id = t.replay_range_id AND r.replay_task_id = t.id
-                     AND r.status = 'requeued'
-                     AND r.task_kind = t.task_kind AND r.host_id = t.host_id
+                   WHERE r.id = t.replay_range_id AND r.host_id = t.host_id
                      AND r.workspace_id = t.workspace_id AND r.project_id = t.project_id
                      AND r.session_row_id IS t.session_row_id
-                     AND r.to_event_id = t.high_watermark_event_id
+                     AND COALESCE(t.cursor_event_id, 0) >= r.from_event_id - 1
+                     AND t.high_watermark_event_id BETWEEN r.from_event_id AND r.to_event_id
+                     AND (r.replay_task_id IS NOT t.id OR
+                         (r.task_kind = t.task_kind AND r.to_event_id = t.high_watermark_event_id))
+                     AND (?5 = 0 OR (r.replay_task_id = t.id AND r.status = 'requeued'))
                      AND ?3 BETWEEN r.from_event_id AND r.to_event_id)) END
          FROM extraction_tasks t
          WHERE t.id = ?1 AND t.lease_owner = ?2 AND t.status = 'processing'
            AND t.lease_expires_epoch > ?4",
-            params![task_id, lease_owner, completed, now],
+            params![task_id, lease_owner, completed, now, exact_canonical],
             |row| row.get::<_, bool>(0),
         )
         .optional()?;
