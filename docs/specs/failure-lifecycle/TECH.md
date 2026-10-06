@@ -258,8 +258,26 @@ Canonical re-enqueue inherits progress only from that range's linked, validated
 old primary task. Existing successors are restored explicitly from their own
 verified checkpoint; NULL starts at that member's original lower bound. A new
 parent chunk must not replace a failed child's cursor with the parent cursor.
-Failed replay tasks
-retain their last successful cursor instead of skipping a failed chunk.
+Failed replay tasks retain their last successful cursor instead of skipping a
+failed chunk. When a repeated ordinary producer finds an existing bounded task
+already linked to a replay range, that existing member's validated checkpoint
+and original bounds govern revival; the ordinary producer's old cursor cannot
+reset replay progress. Archived or quarantined members fail closed with their
+task/range identity and retain their archive until explicit governed recovery.
+
+Retry selection, count, dry-run, explicit mutation and automatic maintenance
+recognize one narrow pending-member exception: an unleased, noncanonical
+`graph_candidate` in the same range, with validated identity/bounds, blocked by
+an unleased failed `memory_candidate` in that range and scope whose target covers
+the graph target but whose cursor has not reached it. This permits recovery of
+the failed prerequisite without inventing progress or depending on a Waiting
+task to exhaust its retry budget. Every family member still validates before any
+write; processing rows, foreign owners, unrelated pending tasks and pending
+canonical tasks reject admission. Ordinary recovery preserves the admitted
+pending graph's attempts and `next_retry_epoch`; exact admission rejects a
+future retry time and otherwise claims it under the same explicit family lease.
+Quarantine retains the stricter no-pending/no-processing predicate, and human
+review waits are not an automatic-recovery exception.
 
 Required processor effects finish before the success transaction. The existing
 summary/transcript/raw-archive checkpoint still supports idempotent recovery of

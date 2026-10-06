@@ -98,6 +98,15 @@ returns unfinished owned work and the range to archived quarantine. Artifact wri
 retain their existing at-least-once, idempotent recovery behavior: a crash before
 the final success checkpoint may repeat a chunk, and must not skip its effects.
 
+A pending graph successor waiting for this same replay family's failed memory
+extraction must not prevent recovery of its own prerequisite forever. Recovery
+may retain or claim that strictly validated, unleased successor together with
+the failed prerequisite. Ordinary recovery preserves its waiting backoff; exact
+recovery waits until every admitted member is retry-ready. Other active work
+still blocks admission, and quarantine does not acquire pending tasks. Repeating
+a bounded follow-up enqueue also respects that existing task's own progress and
+archive, even when the producer itself is an ordinary task.
+
 ### Worker liveness (Refs #1105)
 
 A recent heartbeat is healthy only while the operating system confirms its
