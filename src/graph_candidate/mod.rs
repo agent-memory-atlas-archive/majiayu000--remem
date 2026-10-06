@@ -17,6 +17,10 @@ mod parser;
 pub(crate) mod review;
 mod source;
 
+#[cfg(test)]
+#[path = "tests/replay_waiting.rs"]
+mod replay_waiting_tests;
+
 use parser::{parse_graph_candidates, parse_graph_defer_reason};
 use source::{
     build_graph_candidate_prompt, graph_candidate_blocked_by_memory_candidates,
