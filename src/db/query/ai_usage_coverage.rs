@@ -12,7 +12,8 @@ const COVERAGE_SELECT: &str = "
     COALESCE(SUM(usage_status = 'legacy_unverified'), 0),
     COALESCE(SUM(attempt_outcome = 'failed'), 0),
     COALESCE(SUM(cost_status = 'unpriced' OR pricing_source IN ('unknown_pricing', 'invalid_pricing')), 0),
-    COALESCE(SUM(cost_status <> 'complete' OR pricing_source IN ('unknown_pricing', 'invalid_pricing')), 0)";
+    COALESCE(SUM(cost_status <> 'complete' OR pricing_source IN ('unknown_pricing', 'invalid_pricing')
+        OR usage_status IN ('estimated', 'missing', 'invalid', 'legacy_unverified')), 0)";
 
 /// Read-only legacy surfaces can predate v096. Preserve their costs, but do
 /// not infer complete observations from old provenance labels.

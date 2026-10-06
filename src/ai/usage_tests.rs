@@ -82,6 +82,55 @@ fn usage_observation_keeps_partial_turn_evidence_additive() {
     assert_eq!(usage.parts[1].tokens.cache_read_tokens, 20);
 }
 
+#[test]
+fn usage_observation_invalid_subtotals_preserve_raw_gross_in_ledger() -> Result<()> {
+    let _scope = crate::db::test_support::ScopedTestDataDir::new("usage-invalid-gross");
+    let ctx = super::UsageContext {
+        project: Some("/fixture"),
+        session_id: None,
+        operation: "invalid-usage",
+        host: None,
+        profile: None,
+    };
+    for (raw, expected) in [
+        (
+            json!({"input_tokens":100,"cached_input_tokens":200,"output_tokens":0,"reasoning_output_tokens":0}),
+            100,
+        ),
+        (
+            json!({"input_tokens":0,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":2}),
+            1,
+        ),
+    ] {
+        let observation = codex(raw);
+        assert_eq!(observation.status, UsageStatus::Invalid);
+        assert_eq!(observation.known_total_tokens, expected);
+        let evidence = super::types::AiCallResult {
+            text: "ok".into(),
+            executor: "codex-cli",
+            model: "gpt-5.2".into(),
+            usage: Some(observation),
+            usage_source: Some("codex_log"),
+        };
+        super::usage::record_usage(ctx, &evidence, "success", 0, 0);
+    }
+    let conn = crate::db::open_db()?;
+    let totals: (i64, i64, i64, f64) = conn.query_row(
+        "SELECT COUNT(*), SUM(total_tokens), SUM(usage_status='invalid'), SUM(estimated_cost_usd) FROM ai_usage_events", [],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+    assert_eq!(totals, (2, 101, 2, 0.0));
+    let contradictory_cache: i64 = conn.query_row(
+        "SELECT cache_read_tokens FROM ai_usage_events ORDER BY id LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        contradictory_cache, 200,
+        "retain contradictory evidence without promoting it to gross usage"
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 fn fake_profile(
     dir: &std::path::Path,
@@ -186,6 +235,7 @@ fn usage_attempt_timeout_preserves_terminal_counters_already_read() -> Result<()
             "fixture",
             &profile,
             std::time::Duration::from_millis(250),
+            None,
         ))
         .unwrap_err();
     assert!(error.to_string().contains("timed out"));
@@ -231,6 +281,7 @@ fn usage_attempt_stdin_failure_and_backpressure_keep_output_evidence() -> Result
                 &prompt,
                 &profile,
                 std::time::Duration::from_millis(250),
+                None,
             ))
             .unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(3));
@@ -241,5 +292,171 @@ fn usage_attempt_stdin_failure_and_backpressure_keep_output_evidence() -> Result
             .evidence;
         assert_eq!(evidence.usage.as_ref().unwrap().known_total_tokens, 140);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn usage_attempt_outer_cancellation_records_observed_or_missing_once() -> Result<()> {
+    let scope = crate::db::test_support::ScopedTestDataDir::new("usage-outer-cancel");
+    std::fs::create_dir_all(&scope.path)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let ctx = super::UsageContext {
+        project: Some("/fixture"),
+        session_id: None,
+        operation: "outer-cancel",
+        host: None,
+        profile: None,
+    };
+    for (name, observed) in [("reported", true), ("no-newline", true), ("missing", false)] {
+        let profile = fake_profile(&scope.path, name, "while :; do sleep 0.02; done", observed)?;
+        if name == "no-newline" {
+            let path = profile.cli_path.as_ref().unwrap();
+            let script = std::fs::read_to_string(path)?.replace("printf '%s\\n'", "printf '%s'");
+            std::fs::write(path, script)?;
+        }
+        let outer = runtime.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(750),
+                super::with_resolved_profile(profile, super::call_ai("test", "fixture", ctx)),
+            )
+            .await
+        });
+        assert!(outer.is_err());
+    }
+    let profile = fake_profile(&scope.path, "success", "printf ok > \"$output\"", true)?;
+    assert_eq!(
+        runtime.block_on(super::with_resolved_profile(
+            profile,
+            super::call_ai("test", "fixture", ctx)
+        ))?,
+        "ok"
+    );
+    let conn = crate::db::open_db()?;
+    let rows: Vec<(String, String, i64)> = conn
+        .prepare(
+            "SELECT attempt_outcome, usage_status, total_tokens FROM ai_usage_events ORDER BY id",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            ("failed".into(), "complete".into(), 140),
+            ("failed".into(), "complete".into(), 140),
+            ("failed".into(), "missing".into(), 0),
+            ("success".into(), "complete".into(), 140)
+        ]
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn usage_attempt_auto_model_is_unpriced_without_global_override() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!(
+        "remem-usage-auto-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&dir)?;
+    let mut profile = fake_profile(&dir, "auto", "printf ok > \"$output\"", true)?;
+    profile.model = None;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for (config, expected_status) in [
+        ("version = 1\n", "unpriced"),
+        (
+            "[pricing]\ninput_per_mtok = 2.0\noutput_per_mtok = 8.0\n",
+            "complete",
+        ),
+    ] {
+        super::tests::with_pricing_config(
+            config,
+            &[
+                ("REMEM_PRICE_INPUT_PER_MTOK", None),
+                ("REMEM_PRICE_OUTPUT_PER_MTOK", None),
+            ],
+            || -> Result<()> {
+                let evidence = crate::db::with_data_dir(&dir, || {
+                    runtime.block_on(super::codex_cli::call_codex_cli_with_timeout(
+                        "test",
+                        "fixture",
+                        &profile,
+                        std::time::Duration::from_secs(2),
+                        None,
+                    ))
+                })?;
+                assert_eq!(evidence.model, "codex-default");
+                let (cost, source, status) = super::pricing::estimate_observed_cost_usd(
+                    &evidence.model,
+                    evidence.usage.as_ref().unwrap(),
+                )?;
+                assert_eq!(status, expected_status);
+                if status == "unpriced" {
+                    assert_eq!((cost, source), (0.0, "unknown_pricing"));
+                } else {
+                    assert!((cost - 0.00052).abs() < 1e-12);
+                    assert_eq!(source, "config_override");
+                }
+                Ok(())
+            },
+        )?;
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn usage_attempt_guard_frames_split_turns_and_ignores_partial_json() -> Result<()> {
+    let _scope = crate::db::test_support::ScopedTestDataDir::new("usage-framing");
+    let profile = crate::runtime_config::ResolvedMemoryAiProfile {
+        profile_name: "fixture".into(),
+        executor: crate::runtime_config::MemoryAiExecutor::CodexCli,
+        model: Some("gpt-5.2".into()),
+        cli_path: None,
+        base_url: None,
+        reasoning_effort: None,
+    };
+    let ctx = super::UsageContext {
+        project: None,
+        session_id: None,
+        operation: "framing",
+        host: None,
+        profile: None,
+    };
+    let first = json!({"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0}}).to_string();
+    let second = json!({"type":"turn.completed","usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":10,"reasoning_output_tokens":0}}).to_string();
+    let mut guard = super::usage::UsageAttemptGuard::new(ctx, &profile);
+    for bytes in [
+        &first.as_bytes()[..20],
+        &first.as_bytes()[20..],
+        b"\n",
+        second.as_bytes(),
+    ] {
+        guard.observe_codex_bytes(bytes);
+    }
+    let snapshot = guard.snapshot();
+    assert_eq!(snapshot.usage.as_ref().unwrap().known_total_tokens, 200);
+    assert_eq!(
+        guard.snapshot().usage.as_ref().unwrap().known_total_tokens,
+        200,
+        "snapshots must not merge trailing events twice"
+    );
+    guard.complete(&snapshot, "success", 0, 0);
+    drop(guard);
+    let incomplete = super::usage::UsageAttemptGuard::new(ctx, &profile);
+    incomplete.observe_codex_bytes(&first.as_bytes()[..20]);
+    drop(incomplete);
+    let conn = crate::db::open_db()?;
+    let totals: (i64, i64, i64) = conn.query_row(
+        "SELECT COUNT(*),SUM(total_tokens),SUM(usage_status='missing') FROM ai_usage_events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(totals, (2, 200, 1));
     Ok(())
 }

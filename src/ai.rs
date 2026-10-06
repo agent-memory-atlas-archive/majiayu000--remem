@@ -16,12 +16,13 @@ use cli::call_cli;
 use codex_cli::call_codex_cli;
 use http::call_http;
 use pricing::estimate_tokens;
-use usage::record_usage;
+use usage::UsageAttemptGuard;
 
 tokio::task_local! {
     static RESOLVED_PROFILE_OVERRIDE: crate::runtime_config::ResolvedMemoryAiProfile;
 }
 
+#[cfg(test)]
 pub(crate) use types::TokenUsage;
 pub use types::UsageContext;
 pub(crate) use usage_observation::{UsageObservation, UsageStatus};
@@ -41,6 +42,7 @@ pub async fn call_ai(
             },
         )?,
     };
+    let mut attempt = UsageAttemptGuard::new(ctx, &profile);
     let result = match profile.executor {
         crate::runtime_config::MemoryAiExecutor::Http => {
             call_http(system, user_message, &profile).await
@@ -49,7 +51,7 @@ pub async fn call_ai(
             call_cli(system, user_message, &profile).await
         }
         crate::runtime_config::MemoryAiExecutor::CodexCli => {
-            call_codex_cli(system, user_message, &profile).await
+            call_codex_cli(system, user_message, &profile, &attempt).await
         }
     };
 
@@ -57,45 +59,15 @@ pub async fn call_ai(
     match result {
         Ok(result) => {
             let output_tokens = estimate_tokens(&result.text);
-            record_usage(ctx, &result, "success", input_tokens, output_tokens);
+            attempt.complete(&result, "success", input_tokens, output_tokens);
             Ok(result.text)
         }
         Err(error) => {
-            let fallback;
-            let evidence = if let Some(failure) = error.downcast_ref::<types::AiCallFailure>() {
-                &failure.evidence
+            if let Some(failure) = error.downcast_ref::<types::AiCallFailure>() {
+                attempt.complete(&failure.evidence, "failed", 0, 0);
             } else {
-                let (executor, model, source) = match profile.executor {
-                    crate::runtime_config::MemoryAiExecutor::Http => (
-                        "http",
-                        config::resolve_model_for_api(profile.model.as_deref().unwrap_or("haiku"))
-                            .to_string(),
-                        Some("anthropic_usage"),
-                    ),
-                    crate::runtime_config::MemoryAiExecutor::CodexCli => (
-                        "codex-cli",
-                        profile
-                            .model
-                            .clone()
-                            .unwrap_or_else(|| "codex-default".into()),
-                        Some("codex_log"),
-                    ),
-                    crate::runtime_config::MemoryAiExecutor::ClaudeCli => (
-                        "cli",
-                        profile.model.clone().unwrap_or_else(|| "haiku".into()),
-                        None,
-                    ),
-                };
-                fallback = types::AiCallResult {
-                    text: String::new(),
-                    executor,
-                    model,
-                    usage: None,
-                    usage_source: source,
-                };
-                &fallback
-            };
-            record_usage(ctx, evidence, "failed", 0, 0);
+                attempt.complete(&attempt.snapshot(), "failed", 0, 0);
+            }
             Err(error)
         }
     }

@@ -30,7 +30,7 @@ fn usage_coverage_follows_identical_project_time_and_group_filters() -> Result<(
         ("partial", "success", "remem_static", "partial", 0.001),
         ("missing", "failed", "remem_static", "partial", 0.0),
         ("invalid", "failed", "remem_static", "partial", 0.0),
-        ("estimated", "success", "remem_static", "complete", 0.005),
+        ("estimated", "success", "remem_static", "partial", 0.005),
         (
             "legacy_unverified",
             "unknown",
@@ -93,7 +93,7 @@ fn usage_coverage_follows_identical_project_time_and_group_filters() -> Result<(
     );
     assert_eq!(
         (coverage.unpriced_calls, coverage.cost_incomplete_calls),
-        (1, 5)
+        (1, 6)
     );
     assert!(!coverage.cost_complete());
     let daily = query_daily_ai_usage(&conn, epoch, Some("/wanted"), 10)?;
@@ -114,11 +114,40 @@ fn usage_coverage_follows_identical_project_time_and_group_filters() -> Result<(
             .iter()
             .map(|row| row.coverage.cost_incomplete_calls)
             .sum::<i64>(),
-        5
+        6
     );
     let empty = query_ai_usage_totals(&conn, Some(epoch), Some("/absent"))?;
     assert_eq!(empty.calls, 0);
     assert!(empty.coverage.cost_complete());
+    Ok(())
+}
+
+#[test]
+fn usage_coverage_text_estimate_never_claims_complete_cost() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    crate::migrate::run_migrations(&conn)?;
+    // Even an inconsistent row must not make text-estimated usage look
+    // complete. New writers persist partial; the read boundary stays safe.
+    insert(
+        &conn,
+        "/fixture",
+        1,
+        "estimated",
+        "success",
+        "remem_static",
+        "complete",
+        0.005,
+    )?;
+    let totals = query_ai_usage_totals(&conn, None, None)?;
+    assert_eq!(totals.estimated_cost_usd, 0.005);
+    assert_eq!(totals.coverage.estimated_calls, 1);
+    assert_eq!(totals.coverage.cost_incomplete_calls, 1);
+    assert!(!totals.coverage.cost_complete());
+    conn.execute("UPDATE ai_usage_events SET cost_status = 'partial'", [])?;
+    assert_eq!(
+        query_ai_usage_totals(&conn, None, None)?.coverage,
+        totals.coverage
+    );
     Ok(())
 }
 

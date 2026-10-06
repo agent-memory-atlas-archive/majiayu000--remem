@@ -100,7 +100,15 @@ impl UsageObservation {
                 Counter::Known(_) => {}
             }
         }
-        observation.known_total_tokens = observation.tokens.total_tokens();
+        let input = Counter::known_gross(counters[5], &[counters[0], counters[3], counters[4]]);
+        let output = Counter::known_gross(counters[6], &[counters[1], counters[2]]);
+        if let Some(total) =
+            input.and_then(|input| output.and_then(|output| input.checked_add(output)))
+        {
+            observation.known_total_tokens = total;
+        } else {
+            observation.invalid_fields.push("total_tokens");
+        }
         observation.refresh_status();
         observation
     }
@@ -151,9 +159,6 @@ impl UsageObservation {
     }
 
     fn refresh_status(&mut self) {
-        if self.tokens.checked_total_tokens().is_none() {
-            self.invalid_fields.push("total_tokens");
-        }
         self.missing_fields.sort_unstable();
         self.missing_fields.dedup();
         self.invalid_fields.sort_unstable();
@@ -178,6 +183,21 @@ pub(super) enum Counter {
 }
 
 impl Counter {
+    fn known_gross(raw: Self, categories: &[Self]) -> Option<i64> {
+        match raw {
+            // Retain contradictory subtotals in details, but never inflate a
+            // valid reported gross input/output total with those subtotals.
+            Self::Known(total) => Some(total),
+            Self::Invalid => Some(0),
+            Self::Missing => categories.iter().try_fold(0_i64, |sum, category| {
+                if let Self::Known(value) = category {
+                    sum.checked_add(*value)
+                } else {
+                    Some(sum)
+                }
+            }),
+        }
+    }
     pub fn read(value: &Value, key: &str) -> Self {
         match value.get(key) {
             None | Some(Value::Null) => Self::Missing,

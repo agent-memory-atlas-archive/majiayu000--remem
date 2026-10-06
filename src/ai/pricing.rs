@@ -73,6 +73,12 @@ pub(super) fn pricing_breakdown_for_model(model: &str) -> Result<Option<ModelPri
     }
 
     let model_lower = model.to_lowercase();
+    // The auto preset delegates selection to Codex. This placeholder does
+    // not identify an observed GPT-5 model; global overrides above may still
+    // price the operator's local estimate.
+    if model_lower == "codex-default" {
+        return Ok(None);
+    }
     // GPT-5.6 Codex subscription models are billed in product credits rather
     // than the generic GPT-5 USD-per-token schedule. Never manufacture a USD
     // estimate for them; an explicit global operator override above remains
@@ -224,7 +230,10 @@ fn price_observation(
     }
     if !observation.parts.is_empty() {
         let mut cost = 0.0;
-        let mut complete = observation.status != super::UsageStatus::Invalid;
+        let mut complete = !matches!(
+            observation.status,
+            super::UsageStatus::Invalid | super::UsageStatus::Estimated
+        );
         for part in &observation.parts {
             let (portion, _, status) = price_observation(pricing, part)?;
             cost += portion;
@@ -287,7 +296,8 @@ fn price_observation(
     Ok((
         cost,
         pricing.source,
-        if input_complete && output_complete {
+        if input_complete && output_complete && observation.status != super::UsageStatus::Estimated
+        {
             "complete"
         } else {
             "partial"
@@ -337,6 +347,23 @@ fn price_group(
 mod observation_tests {
     use super::*;
     use crate::ai::codex_usage::parse_codex_json_events;
+
+    #[test]
+    fn usage_cost_text_estimate_keeps_amount_and_partial_coverage_in_parts() {
+        let pricing = ModelPricing::openai(2.0, 8.0, 0.2);
+        let mut estimated = crate::ai::UsageObservation::estimated(1_000_000, 1_000_000);
+        assert_eq!(
+            price_observation(pricing, &estimated).unwrap(),
+            (10.0, "remem_static", "partial")
+        );
+        let observed = parse_codex_json_events(br#"{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":1000000,"reasoning_output_tokens":0}}"#, None).unwrap().unwrap().usage;
+        estimated.merge(observed);
+        assert_eq!(estimated.parts.len(), 2);
+        assert_eq!(
+            price_observation(pricing, &estimated).unwrap(),
+            (20.0, "remem_static", "partial")
+        );
+    }
 
     #[test]
     fn usage_cost_missing_reasoning_split_requires_equal_category_rates() {

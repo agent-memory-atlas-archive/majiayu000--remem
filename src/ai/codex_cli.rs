@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
+use super::usage::UsageAttemptGuard;
 use crate::ai::types::{AiCallFailure, AiCallResult, AI_TIMEOUT_SECS};
 use crate::runtime_config::ResolvedMemoryAiProfile;
 
@@ -11,12 +12,14 @@ pub(super) async fn call_codex_cli(
     system: &str,
     user_message: &str,
     profile: &ResolvedMemoryAiProfile,
+    attempt: &UsageAttemptGuard<'_>,
 ) -> Result<AiCallResult> {
     call_codex_cli_with_timeout(
         system,
         user_message,
         profile,
         std::time::Duration::from_secs(AI_TIMEOUT_SECS),
+        Some(attempt),
     )
     .await
 }
@@ -26,6 +29,7 @@ pub(super) async fn call_codex_cli_with_timeout(
     user_message: &str,
     profile: &ResolvedMemoryAiProfile,
     timeout: std::time::Duration,
+    observer: Option<&UsageAttemptGuard<'_>>,
 ) -> Result<AiCallResult> {
     let codex = profile.cli_path.as_deref().unwrap_or("codex");
     let model = profile.model.clone();
@@ -77,7 +81,9 @@ pub(super) async fn call_codex_cli_with_timeout(
                 drop(stdin);
             },
             async {
-                stdout_error = stdout.read_to_end(&mut stdout_bytes).await.err();
+                stdout_error = read_stdout(&mut stdout, &mut stdout_bytes, observer)
+                    .await
+                    .err();
             },
             async {
                 stderr_error = stderr.read_to_end(&mut stderr_bytes).await.err();
@@ -156,6 +162,25 @@ fn finish_output(mut evidence: AiCallResult, text: Result<String>) -> Result<AiC
             Ok(evidence)
         }
         Err(error) => Err(AiCallFailure::with_evidence(error, evidence)),
+    }
+}
+
+async fn read_stdout(
+    stdout: &mut tokio::process::ChildStdout,
+    bytes: &mut Vec<u8>,
+    observer: Option<&UsageAttemptGuard<'_>>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = stdout.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if let Some(observer) = observer {
+            observer.observe_codex_bytes(&buffer[..count]);
+        }
     }
 }
 

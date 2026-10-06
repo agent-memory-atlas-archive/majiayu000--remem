@@ -32,10 +32,12 @@ impl TokenUsage {
         }
     }
 
+    #[cfg(test)]
     pub fn total_tokens(&self) -> i64 {
         self.checked_total_tokens().unwrap_or(0)
     }
 
+    #[cfg(test)]
     pub fn checked_total_tokens(&self) -> Option<i64> {
         // Raw Codex totals remain useful even when a cache/reasoning split
         // is unavailable. A missing raw total can still have known parts.
@@ -50,7 +52,7 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct AiCallResult {
     pub text: String,
     pub executor: &'static str,

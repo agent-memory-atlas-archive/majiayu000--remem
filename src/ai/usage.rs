@@ -1,6 +1,111 @@
 use super::UsageObservation;
 use crate::ai::pricing::estimate_observed_cost_usd;
 use crate::ai::types::{AiCallResult, UsageContext};
+use crate::runtime_config::{MemoryAiExecutor, ResolvedMemoryAiProfile};
+
+/// Own the attempt boundary, including cancellation of the awaiting caller.
+/// No detached recorder is spawned: dropping the backend first leaves this
+/// guard alive long enough to persist the terminal counters already read.
+pub(super) struct UsageAttemptGuard<'a> {
+    ctx: UsageContext<'a>,
+    state: std::sync::Mutex<AttemptState>,
+    armed: bool,
+}
+
+#[derive(Clone)]
+struct AttemptState {
+    evidence: AiCallResult,
+    pending_line: Vec<u8>,
+}
+
+impl<'a> UsageAttemptGuard<'a> {
+    pub fn new(ctx: UsageContext<'a>, profile: &ResolvedMemoryAiProfile) -> Self {
+        let (executor, model, source) = match profile.executor {
+            MemoryAiExecutor::Http => (
+                "http",
+                super::config::resolve_model_for_api(profile.model.as_deref().unwrap_or("haiku"))
+                    .to_string(),
+                Some("anthropic_usage"),
+            ),
+            MemoryAiExecutor::CodexCli => (
+                "codex-cli",
+                profile
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "codex-default".into()),
+                Some("codex_log"),
+            ),
+            MemoryAiExecutor::ClaudeCli => (
+                "cli",
+                profile.model.clone().unwrap_or_else(|| "haiku".into()),
+                None,
+            ),
+        };
+        Self {
+            ctx,
+            state: std::sync::Mutex::new(AttemptState {
+                evidence: AiCallResult {
+                    text: String::new(),
+                    executor,
+                    model,
+                    usage: None,
+                    usage_source: source,
+                },
+                pending_line: Vec::new(),
+            }),
+            armed: true,
+        }
+    }
+
+    pub fn observe_codex_bytes(&self, bytes: &[u8]) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.pending_line.extend_from_slice(bytes);
+        if let Some(end) = state.pending_line.iter().rposition(|byte| *byte == b'\n') {
+            let lines: Vec<u8> = state.pending_line.drain(..=end).collect();
+            merge_codex_events(&mut state.evidence, &lines);
+        }
+    }
+
+    pub fn snapshot(&self) -> AiCallResult {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        // No mutex is held while producing or recording the snapshot. A
+        // complete final JSON event needs no newline; partial JSON adds none.
+        merge_codex_events(&mut state.evidence, &state.pending_line);
+        state.evidence
+    }
+
+    pub fn complete(&mut self, result: &AiCallResult, outcome: &str, input: i64, output: i64) {
+        self.armed = false;
+        record_usage(self.ctx, result, outcome, input, output);
+    }
+}
+
+fn merge_codex_events(evidence: &mut AiCallResult, bytes: &[u8]) {
+    match super::codex_usage::parse_codex_json_events(bytes, None) {
+        Ok(Some(event)) => match &mut evidence.usage {
+            Some(usage) => usage.merge(event.usage),
+            None => evidence.usage = Some(event.usage),
+        },
+        Ok(None) => {}
+        Err(error) => crate::log::error("ai", &format!("codex usage observation failed: {error}")),
+    }
+}
+
+impl Drop for UsageAttemptGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.armed = false;
+            record_usage(self.ctx, &self.snapshot(), "failed", 0, 0);
+        }
+    }
+}
 
 pub(super) fn record_usage(
     ctx: UsageContext<'_>,
