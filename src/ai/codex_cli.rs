@@ -56,28 +56,38 @@ pub(super) async fn call_codex_cli_with_timeout(
         .spawn()
         .with_context(|| format!("failed to spawn '{}' - is Codex CLI installed?", codex))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(prompt.as_bytes()).await?;
-    }
-
     // The buffers outlive the cancellable wait, preserving terminal events
     // already read when the process times out or a pipe fails.
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stdin = child.stdin.take().context("Codex stdin pipe missing")?;
     let mut stdout = child.stdout.take().context("Codex stdout pipe missing")?;
     let mut stderr = child.stderr.take().context("Codex stderr pipe missing")?;
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
+    let mut stdin_error = None;
+    let mut stdout_error = None;
+    let mut stderr_error = None;
     let exit = tokio::time::timeout(timeout, async {
-        let (_, _, status) = tokio::try_join!(
-            stdout.read_to_end(&mut stdout_bytes),
-            stderr.read_to_end(&mut stderr_bytes),
+        // Join rather than try_join: an input error must not cancel a
+        // still-readable terminal usage event on stdout. The same deadline
+        // covers writing a large prompt and draining the child's output.
+        let (_, _, _, status) = tokio::join!(
+            async {
+                stdin_error = stdin.write_all(prompt.as_bytes()).await.err();
+                drop(stdin);
+            },
+            async {
+                stdout_error = stdout.read_to_end(&mut stdout_bytes).await.err();
+            },
+            async {
+                stderr_error = stderr.read_to_end(&mut stderr_bytes).await.err();
+            },
             child.wait(),
-        )?;
-        Ok::<_, std::io::Error>(status)
+        );
+        status
     })
     .await;
-    let exit = match exit {
+    let mut exit = match exit {
         Ok(result) => result.map_err(anyhow::Error::from),
         Err(_) => {
             let _ = child.start_kill();
@@ -87,6 +97,11 @@ pub(super) async fn call_codex_cli_with_timeout(
             ))
         }
     };
+    if let Some(error) = stdin_error {
+        exit = Err(anyhow::Error::from(error).context("failed to write Codex prompt"));
+    } else if let Some(error) = stdout_error.or(stderr_error) {
+        exit = Err(anyhow::Error::from(error).context("failed to read Codex output"));
+    }
 
     let codex_usage =
         match super::codex_usage::parse_codex_json_events(&stdout_bytes, model.clone()) {

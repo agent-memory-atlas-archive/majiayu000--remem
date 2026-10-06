@@ -196,3 +196,50 @@ fn usage_attempt_timeout_preserves_terminal_counters_already_read() -> Result<()
     assert_eq!(evidence.usage.as_ref().unwrap().known_total_tokens, 140);
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn usage_attempt_stdin_failure_and_backpressure_keep_output_evidence() -> Result<()> {
+    let scoped = crate::db::test_support::ScopedTestDataDir::new("usage-stdin");
+    std::fs::create_dir_all(&scoped.path)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let prompt = "x".repeat(1_000_000);
+    for (name, input_action, ending, message) in [
+        (
+            "closed-input",
+            "exec 0<&-",
+            "exit 7",
+            "failed to write Codex prompt",
+        ),
+        (
+            "unread-input",
+            ":",
+            "while :; do sleep 0.02; done",
+            "timed out",
+        ),
+    ] {
+        let profile = fake_profile(&scoped.path, name, ending, true)?;
+        let path = profile.cli_path.as_ref().unwrap();
+        let script = std::fs::read_to_string(path)?.replace("cat >/dev/null", input_action);
+        std::fs::write(path, script)?;
+        let started = std::time::Instant::now();
+        let error = runtime
+            .block_on(super::codex_cli::call_codex_cli_with_timeout(
+                "test",
+                &prompt,
+                &profile,
+                std::time::Duration::from_millis(250),
+            ))
+            .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(error.to_string().contains(message), "{error}");
+        let evidence = &error
+            .downcast_ref::<super::types::AiCallFailure>()
+            .unwrap()
+            .evidence;
+        assert_eq!(evidence.usage.as_ref().unwrap().known_total_tokens, 140);
+    }
+    Ok(())
+}
