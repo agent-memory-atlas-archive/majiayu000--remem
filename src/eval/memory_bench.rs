@@ -76,3 +76,18 @@ pub(crate) fn replay_trusted_security_snapshot(
     .join()
     .map_err(|_| anyhow::anyhow!("trusted security snapshot worker panicked"))?
 }
+
+#[cfg(test)]
+pub(crate) async fn production_security_snapshot_for_test(
+    task: &types::MemoryBenchTask,
+) -> anyhow::Result<(Vec<u8>, Vec<String>)> {
+    let (retrieved, _, snapshot) =
+        production_pipeline::retrieve_with_production_pipeline(task).await?;
+    Ok((
+        snapshot,
+        retrieved
+            .into_iter()
+            .map(|evidence| evidence.event_id)
+            .collect(),
+    ))
+}

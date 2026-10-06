@@ -8,6 +8,8 @@ use crate::eval::memory_bench::types::{MemoryBenchSuiteFixture, MemoryBenchTask}
 use crate::eval::memory_bench::TrustedSecurityReplay;
 use crate::eval::security_snapshot_identity::SnapshotIdentity;
 
+mod dispatch;
+
 fn task() -> Result<MemoryBenchTask> {
     let suite: MemoryBenchSuiteFixture = serde_json::from_str(include_str!(
         "../../../../../eval/public/memory/suites/adversarial-policy/suite.json"

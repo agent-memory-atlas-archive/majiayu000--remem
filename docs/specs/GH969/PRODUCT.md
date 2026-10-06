@@ -262,6 +262,13 @@ in two consecutive accepted decision artifacts, it must be gated off, rolled
 back, removed, or receive an explicit new experiment hypothesis and decision
 date; it cannot remain indefinitely “partial”.
 
+Persisted worker scheduling state emitted by the security benchmark is
+part of its task-bound evidence. A valid snapshot must retain the exact
+benchmark scope, claimed stages, and claim order; extra dispatch rows or
+hidden payloads cannot be accepted as harmless operational metadata. Changes
+to the producing runtime require newly executed native evidence on each
+supported platform before that platform regains security authority.
+
 ## Migration And Rollback Principles
 
 - Additive schema first; readers tolerate the staged state before writers use

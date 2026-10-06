@@ -540,6 +540,23 @@ and verifier-bound report path/hash without re-deriving PASS or source
 equivalence. Policy prose on adjacent lines never authorizes claim wording.
 Level 3 claims still require independent authority.
 
+The security snapshot's closed-world task inventory includes v095
+`worker_dispatch_state`. The typed task binds extraction host/project IDs
+through its sole benchmark session. The deterministic production pipeline
+claims `observation_extract` once, then `memory_candidate` once only for an
+explicitly approved or poisoning-quarantine task. Its exact ledger therefore
+contains the observation group at `(ready_sequence, last_claim_sequence) =
+(0, 1)`, the optional candidate group at `(1, 2)`, and the extraction queue
+with empty host/project at `(0, 1)` or `(0, 2)`. A queued graph follow-up has
+not been claimed and must not add a dispatch row. The verifier checks the
+complete typed ledger row set against this task-derived history, including
+cardinality, scope, stage, host/project, nullability, and both sequences.
+The subsequent production replay comparison still covers every table,
+column, typed cell, and SQLite schema entry, including this ledger; no
+operational-state exemption or sequence normalization is introduced.
+Unexpected rows, scope, sequence, or hidden columns fail closed even when
+the supplied artifact hashes have been updated.
+
 ## Outcome Scorecard
 
 The implementation should extend an existing eval/report artifact rather than
