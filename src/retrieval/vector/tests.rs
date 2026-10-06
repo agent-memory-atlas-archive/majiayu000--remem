@@ -11,6 +11,7 @@ use super::*;
 mod filters;
 mod index_snapshot;
 mod profile_pinning;
+mod profile_scope;
 mod pruning;
 mod vec_index;
 

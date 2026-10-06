@@ -369,6 +369,13 @@ The verified local model is optional; the labeled feature-hash fallback remains
 available. The second-stage local reranker is also optional and disabled until
 configured.
 
+Vector indexes keep each model and artifact revision in its own vector space.
+Project, branch, type, and lifecycle filters apply before nearest-neighbor
+selection. Automatic context uses the same vector executor as search, so old
+memories remain eligible by similarity as a project grows. While a derived
+index is rebuilding, an exact local scan preserves recall; large stores may
+take longer until that profile's index is ready.
+
 Use the [current configuration routes](docs/README.md#configuration), the
 [local embedding contract](docs/specs/local-semantic-embedding/PRODUCT.md), and
 `remem config`, `remem embedding`, or `remem reranker` help for details.

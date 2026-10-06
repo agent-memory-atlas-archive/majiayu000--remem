@@ -1,277 +1,219 @@
-//! sqlite-vec KNN index mirroring `memory_embeddings` (GH-957).
-//!
-//! The portable candidate path (`vector_candidates`) bounds the brute-force
-//! cosine scan by sampling at most 4096 embeddings, so memories outside the
-//! sampled id buckets are unreachable for the semantic channel no matter how
-//! relevant they are. This module maintains one `vec0` virtual table per
-//! embedding dimension profile (`memory_embedding_vec_{dimensions}`) and lets
-//! the vector channel ask sqlite-vec for the globally nearest candidates
-//! instead — relevance truncation instead of recency/bucket truncation.
-//!
-//! Invariants:
-//! - The index is a pure derived mirror: `memory_embeddings` stays the source
-//!   of truth, and every writer dual-writes here (upsert/delete).
-//! - Everything degrades to the brute-force path: no extension on the
-//!   connection, no vec table, or an incomplete backfill all answer `None`.
-//! - Backfill is chunked (one batch per connection open) so a hook-triggered
-//!   `open_db` never stalls on re-indexing a large store.
+//! Exact sqlite-vec mirrors keyed by the complete embedding profile (GH1105).
+//! Source embeddings remain authoritative. Incomplete or absent mirrors use
+//! the same-profile, scope-filtered exact scan, never a recency/ID sample.
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use super::super::embedding::EmbeddingProfile;
-use super::super::vector_candidates::memory_filter_conditions;
-use super::{vec_extension_loaded, VectorHit, VectorSearchFilters};
+#[cfg(test)]
+use super::VectorSearchFilters;
+use super::{vec_extension_loaded, VectorHit, VectorSearchScope};
 
 pub(crate) const VEC_INDEX_BACKFILL_BATCH_SIZE: usize = 512;
+const STATE_TABLE: &str = "memory_embedding_vec_state_v2";
 
-const STATE_TABLE: &str = "memory_embedding_vec_state";
-
-/// One sync-state row per dimension profile. `last_memory_id` is the backfill
-/// cursor over `memory_embeddings` (ascending id order); `done` flips to 1
-/// when a short batch proves the cursor passed the last row. Live writers
-/// dual-write regardless of cursor position, so a partially backfilled table
-/// is always a subset of the source plus newer dual-written rows.
 fn ensure_state_table(conn: &Connection) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {STATE_TABLE} (
-             dimensions INTEGER PRIMARY KEY,
+             model TEXT NOT NULL,
+             dimensions INTEGER NOT NULL,
              last_memory_id INTEGER NOT NULL DEFAULT 0,
              done INTEGER NOT NULL DEFAULT 0,
-             updated_at_epoch INTEGER NOT NULL
+             updated_at_epoch INTEGER NOT NULL,
+             PRIMARY KEY(model, dimensions)
          )"
     ))?;
     Ok(())
 }
 
-fn vec_table_name(dimensions: usize) -> String {
-    format!("memory_embedding_vec_{dimensions}")
+pub(super) fn vec_table_name(profile: EmbeddingProfile<'_>) -> String {
+    let mut digest = Sha256::new();
+    digest.update((profile.model.len() as u64).to_le_bytes());
+    digest.update(profile.model.as_bytes());
+    digest.update((profile.dimensions as u64).to_le_bytes());
+    format!(
+        "memory_embedding_vec_v2_{}_{:x}",
+        profile.dimensions,
+        digest.finalize()
+    )
 }
 
-fn vec_table_exists(conn: &Connection, dimensions: usize) -> Result<bool> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [vec_table_name(dimensions)],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
+fn vec_table_exists(conn: &Connection, profile: EmbeddingProfile<'_>) -> Result<bool> {
+    super::table_exists(conn, &vec_table_name(profile))
 }
 
-fn create_vec_table(conn: &Connection, dimensions: usize) -> Result<()> {
+fn create_vec_table(conn: &Connection, profile: EmbeddingProfile<'_>) -> Result<()> {
     anyhow::ensure!(
-        (1..=65_536).contains(&dimensions),
-        "embedding dimensions out of indexable range: {dimensions}"
+        !profile.model.trim().is_empty(),
+        "embedding model must not be empty"
     );
-    // `dimensions` is a validated integer, so identifier interpolation is safe.
+    anyhow::ensure!(
+        (1..=65_536).contains(&profile.dimensions),
+        "embedding dimensions out of indexable range: {}",
+        profile.dimensions
+    );
     conn.execute_batch(&format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING vec0(
              memory_id INTEGER PRIMARY KEY,
-             embedding float[{dimensions}] distance_metric=cosine,
-             +model TEXT
+             embedding float[{}] distance_metric=cosine
          )",
-        vec_table_name(dimensions)
+        vec_table_name(profile),
+        profile.dimensions
     ))?;
     Ok(())
 }
 
-/// Advance the vec index by at most one backfill batch for every dimension
-/// profile present in `memory_embeddings`. Cheap when in sync: one indexed
-/// state-table lookup per profile.
+/// Advance one bounded batch per source profile. Legacy mirrors never enter
+/// v2 readiness; retiring them changes no authoritative embedding rows.
 pub(crate) fn ensure_vec_index(conn: &Connection) -> Result<()> {
     if !vec_extension_loaded(conn) {
         return Ok(());
     }
     ensure_state_table(conn)?;
-
-    let mut profiles: Vec<i64> = {
-        let mut stmt =
-            conn.prepare("SELECT DISTINCT dimensions FROM memory_embeddings ORDER BY dimensions")?;
-        let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    retire_legacy_mirrors(conn)?;
+    let profiles = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT model, dimensions FROM memory_embeddings ORDER BY model, dimensions",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
         crate::db::query::collect_rows(rows)?
     };
-    let builtin = super::EMBEDDING_DIMENSIONS as i64;
-    if !profiles.contains(&builtin) {
-        profiles.push(builtin);
-    }
-
-    for dimensions in profiles {
+    for (model, dimensions) in profiles {
         anyhow::ensure!(
             dimensions > 0,
             "memory_embeddings carries non-positive dimensions {dimensions}"
         );
-        ensure_vec_index_profile(conn, dimensions as usize)?;
+        let profile = EmbeddingProfile {
+            model: &model,
+            dimensions: dimensions as usize,
+        };
+        super::with_embedding_savepoint(conn, "remem_vec_backfill", || {
+            ensure_vec_index_profile(conn, profile)
+        })?;
     }
     Ok(())
 }
 
-fn ensure_vec_index_profile(conn: &Connection, dimensions: usize) -> Result<()> {
-    let state: Option<(i64, i64)> = conn
-        .query_row(
-            &format!("SELECT last_memory_id, done FROM {STATE_TABLE} WHERE dimensions = ?1"),
-            [dimensions as i64],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-    let (cursor, done) = state.unwrap_or((0, 0));
-    if done == 1 {
+fn ensure_vec_index_profile(conn: &Connection, profile: EmbeddingProfile<'_>) -> Result<()> {
+    let state: Option<(i64, i64)> = conn.query_row(
+        &format!("SELECT last_memory_id, done FROM {STATE_TABLE} WHERE model = ?1 AND dimensions = ?2"),
+        (profile.model, profile.dimensions as i64),
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let (mut cursor, done) = state.unwrap_or((0, 0));
+    let exists = vec_table_exists(conn, profile)?;
+    if exists && done == 1 {
         return Ok(());
     }
-    create_vec_table(conn, dimensions)?;
-
-    let table = vec_table_name(dimensions);
+    if !exists {
+        cursor = 0;
+    }
+    create_vec_table(conn, profile)?;
     let mut stmt = conn.prepare(
-        "SELECT memory_id, embedding, model
-         FROM memory_embeddings
-         WHERE dimensions = ?1 AND memory_id > ?2
-         ORDER BY memory_id
-         LIMIT ?3",
+        "SELECT memory_id, embedding FROM memory_embeddings
+         WHERE model = ?1 AND dimensions = ?2 AND memory_id > ?3
+         ORDER BY memory_id LIMIT ?4",
     )?;
     let rows = stmt.query_map(
         rusqlite::params![
-            dimensions as i64,
+            profile.model,
+            profile.dimensions as i64,
             cursor,
             VEC_INDEX_BACKFILL_BATCH_SIZE as i64
         ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        },
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
     )?;
     let batch = crate::db::query::collect_rows(rows)?;
-    // vec0 rejects INSERT OR REPLACE / upsert conflict clauses, so replacing
-    // a dual-written row is an explicit delete-then-insert.
+    let table = vec_table_name(profile);
     let mut delete = conn.prepare(&format!("DELETE FROM {table} WHERE memory_id = ?1"))?;
     let mut insert = conn.prepare(&format!(
-        "INSERT INTO {table} (memory_id, embedding, model) VALUES (?1, ?2, ?3)"
+        "INSERT INTO {table} (memory_id, embedding) VALUES (?1, ?2)"
     ))?;
     let mut advanced = cursor;
-    for (memory_id, embedding, model) in &batch {
+    for (memory_id, embedding) in &batch {
         delete.execute([memory_id])?;
-        insert.execute(rusqlite::params![memory_id, embedding, model])?;
+        insert.execute(rusqlite::params![memory_id, embedding])?;
         advanced = *memory_id;
     }
-    let finished = (batch.len() < VEC_INDEX_BACKFILL_BATCH_SIZE) as i64;
     conn.execute(
         &format!(
-            "INSERT INTO {STATE_TABLE} (dimensions, last_memory_id, done, updated_at_epoch)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(dimensions) DO UPDATE SET
+            "INSERT INTO {STATE_TABLE} (model, dimensions, last_memory_id, done, updated_at_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(model, dimensions) DO UPDATE SET
                  last_memory_id = excluded.last_memory_id,
                  done = excluded.done,
                  updated_at_epoch = excluded.updated_at_epoch"
         ),
         rusqlite::params![
-            dimensions as i64,
+            profile.model,
+            profile.dimensions as i64,
             advanced,
-            finished,
+            (batch.len() < VEC_INDEX_BACKFILL_BATCH_SIZE) as i64,
             chrono::Utc::now().timestamp()
         ],
     )?;
     Ok(())
 }
 
-/// True when the KNN path can serve this profile on this connection: the
-/// extension answered, the vec table exists, and its backfill completed.
 pub(crate) fn vec_index_ready(conn: &Connection, profile: EmbeddingProfile<'_>) -> Result<bool> {
-    if !vec_extension_loaded(conn) || !vec_table_exists(conn, profile.dimensions)? {
+    if !vec_extension_loaded(conn)
+        || !vec_table_exists(conn, profile)?
+        || !super::table_exists(conn, STATE_TABLE)?
+    {
         return Ok(false);
     }
     let done: Option<i64> = conn
         .query_row(
-            &format!("SELECT done FROM {STATE_TABLE} WHERE dimensions = ?1"),
-            [profile.dimensions as i64],
+            &format!("SELECT done FROM {STATE_TABLE} WHERE model = ?1 AND dimensions = ?2"),
+            (profile.model, profile.dimensions as i64),
             |row| row.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(done == Some(1))
 }
 
-/// Mirror one `memory_embeddings` row into its vec table. No-op when the
-/// extension or table is absent; the next backfill pass reconciles.
+/// Called inside the source-row transaction, including batch reindex writes.
 pub(crate) fn sync_vec_upsert(
     conn: &Connection,
     memory_id: i64,
     model: &str,
     dimensions: usize,
 ) -> Result<()> {
-    if !vec_extension_loaded(conn) || !vec_table_exists(conn, dimensions)? {
-        return Ok(());
-    }
-    let table = vec_table_name(dimensions);
-    conn.execute(
-        &format!("DELETE FROM {table} WHERE memory_id = ?1"),
-        [memory_id],
-    )
-    .with_context(|| format!("clear vec index row for memory id={memory_id}"))?;
-    conn.execute(
-        &format!(
-            "INSERT INTO {table} (memory_id, embedding, model)
-             SELECT memory_id, embedding, model
-             FROM memory_embeddings
-             WHERE memory_id = ?1 AND model = ?2 AND dimensions = ?3"
-        ),
-        rusqlite::params![memory_id, model, dimensions as i64],
-    )
-    .with_context(|| format!("sync vec index for memory id={memory_id}"))?;
-    Ok(())
+    sync_vec_upsert_batch(conn, EmbeddingProfile { model, dimensions }, &[memory_id])
 }
 
-/// Mirror a batch of `memory_embeddings` rows (one dimension profile) into
-/// its vec table. Used by the reindex batch path, which writes through a
-/// shared prepared statement instead of the single-row funnel.
 pub(crate) fn sync_vec_upsert_batch(
     conn: &Connection,
-    dimensions: usize,
+    profile: EmbeddingProfile<'_>,
     memory_ids: &[i64],
 ) -> Result<()> {
-    if memory_ids.is_empty() || !vec_extension_loaded(conn) || !vec_table_exists(conn, dimensions)?
-    {
+    if memory_ids.is_empty() || !vec_extension_loaded(conn) || !vec_table_exists(conn, profile)? {
         return Ok(());
     }
-    let table = vec_table_name(dimensions);
-    let id_values: Vec<Box<dyn rusqlite::types::ToSql>> = memory_ids
-        .iter()
-        .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
-        .collect();
-    let delete_placeholders = (1..=memory_ids.len())
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let id_refs = crate::db::to_sql_refs(&id_values);
+    let table = vec_table_name(profile);
+    let ids_json = serde_json::to_string(memory_ids)?;
     conn.execute(
-        &format!("DELETE FROM {table} WHERE memory_id IN ({delete_placeholders})"),
-        id_refs.as_slice(),
-    )?;
-
-    let insert_placeholders = (2..=memory_ids.len() + 1)
-        .map(|index| format!("?{index}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(dimensions as i64)];
-    values.extend(
-        memory_ids
-            .iter()
-            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
-    );
-    let refs = crate::db::to_sql_refs(&values);
+        &format!("DELETE FROM {table} WHERE memory_id IN (SELECT value FROM json_each(?1))"),
+        [&ids_json],
+    )
+    .context("clear vector profile mirror batch")?;
     conn.execute(
         &format!(
-            "INSERT INTO {table} (memory_id, embedding, model)
-             SELECT memory_id, embedding, model
-             FROM memory_embeddings
-             WHERE dimensions = ?1 AND memory_id IN ({insert_placeholders})"
+            "INSERT INTO {table} (memory_id, embedding)
+             SELECT memory_id, embedding FROM memory_embeddings
+             WHERE model = ?1 AND dimensions = ?2
+               AND memory_id IN (SELECT value FROM json_each(?3))"
         ),
-        refs.as_slice(),
-    )?;
+        rusqlite::params![profile.model, profile.dimensions as i64, ids_json],
+    )
+    .context("sync vector profile mirror batch")?;
     Ok(())
 }
 
-/// Mirror the inactive-profile prune on `memory_embeddings`: drop vec tables
-/// for other dimension profiles (and their backfill state) and remove
-/// non-target models from the surviving table.
 pub(crate) fn sync_vec_keep_only_profile(
     conn: &Connection,
     model: &str,
@@ -280,54 +222,80 @@ pub(crate) fn sync_vec_keep_only_profile(
     if !vec_extension_loaded(conn) {
         return Ok(());
     }
-    let target_table = vec_table_name(dimensions);
-    for name in existing_vec_tables(conn)? {
-        if name == target_table {
-            conn.execute(
-                &format!("DELETE FROM \"{name}\" WHERE model != ?1"),
-                [model],
-            )?;
-        } else {
-            conn.execute_batch(&format!("DROP TABLE \"{name}\""))?;
+    let keep = vec_table_name(EmbeddingProfile { model, dimensions });
+    for table in existing_vec_tables(conn)? {
+        if table != keep {
+            conn.execute_batch(&format!("DROP TABLE \"{table}\""))?;
         }
     }
     ensure_state_table(conn)?;
     conn.execute(
-        &format!("DELETE FROM {STATE_TABLE} WHERE dimensions != ?1"),
-        [dimensions as i64],
+        &format!("DELETE FROM {STATE_TABLE} WHERE NOT (model = ?1 AND dimensions = ?2)"),
+        (model, dimensions as i64),
     )?;
+    conn.execute_batch("DROP TABLE IF EXISTS memory_embedding_vec_state")?;
     Ok(())
 }
 
 fn existing_vec_tables(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND name LIKE 'memory_embedding_vec_%'",
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_embedding_vec_%'",
     )?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-    // vec0 creates shadow tables (`_info`, `_chunks`, ...) under the same
-    // prefix; only names whose suffix is purely the dimension number are the
-    // virtual tables themselves.
     Ok(crate::db::query::collect_rows(rows)?
         .into_iter()
         .filter(|name| {
-            name.strip_prefix("memory_embedding_vec_")
-                .is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+            let Some(suffix) = name.strip_prefix("memory_embedding_vec_") else {
+                return false;
+            };
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+            suffix
+                .strip_prefix("v2_")
+                .and_then(|s| s.split_once('_'))
+                .is_some_and(|(dims, digest)| {
+                    !dims.is_empty()
+                        && dims.bytes().all(|b| b.is_ascii_digit())
+                        && digest.len() == 64
+                        && digest.bytes().all(|b| b.is_ascii_hexdigit())
                 })
         })
         .collect())
 }
 
-/// Globally nearest candidates for the query embedding, or `None` when the
-/// index cannot serve this profile (caller falls back to the brute-force
-/// candidate path). Distances are sqlite-vec cosine distances, ascending, and
-/// rows pass the same `memories` visibility filters as the portable path.
+fn retire_legacy_mirrors(conn: &Connection) -> Result<()> {
+    for table in existing_vec_tables(conn)? {
+        if !table.starts_with("memory_embedding_vec_v2_") {
+            conn.execute_batch(&format!("DROP TABLE \"{table}\""))?;
+        }
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS memory_embedding_vec_state")?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn knn_candidates(
     conn: &Connection,
     query_embedding: &[f32],
     profile: EmbeddingProfile<'_>,
     filters: VectorSearchFilters<'_>,
+    candidate_limit: usize,
+) -> Result<Option<Vec<VectorHit>>> {
+    knn_candidates_scoped(
+        conn,
+        query_embedding,
+        profile,
+        &VectorSearchScope::from_filters(filters),
+        candidate_limit,
+    )
+}
+
+pub(super) fn knn_candidates_scoped(
+    conn: &Connection,
+    query_embedding: &[f32],
+    profile: EmbeddingProfile<'_>,
+    scope: &VectorSearchScope,
     candidate_limit: usize,
 ) -> Result<Option<Vec<VectorHit>>> {
     if !vec_index_ready(conn, profile)? {
@@ -339,53 +307,39 @@ pub(crate) fn knn_candidates(
         profile.dimensions,
         query_embedding.len()
     );
-    let mut blob = Vec::with_capacity(std::mem::size_of_val(query_embedding));
-    for value in query_embedding {
-        blob.extend_from_slice(&value.to_le_bytes());
-    }
-    let (conditions, filter_values) = memory_filter_conditions(filters, 5);
-    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(blob),
-        Box::new(candidate_limit as i64),
-        Box::new(profile.model.to_string()),
-        Box::new(profile.dimensions as i64),
-    ];
-    values.extend(filter_values);
-    // sqlite-vec forbids WHERE constraints on vec0 auxiliary columns inside a
-    // KNN query, so the model check goes through the source-of-truth table
-    // instead of the mirrored `+model` column.
+    let count = scope.values.len();
+    let blob = super::encode_embedding(query_embedding);
+    let k = candidate_limit as i64;
+    let dimensions = profile.dimensions as i64;
+    let mut values = crate::db::to_sql_refs(&scope.values);
+    values.extend([
+        &blob as &dyn rusqlite::types::ToSql,
+        &k,
+        &profile.model,
+        &dimensions,
+    ]);
+    // vec0 consumes rowid IN as a KNN prefilter. Outer JOIN/EXISTS predicates
+    // would discard already-chosen neighbors and let foreign scopes starve it.
     let sql = format!(
-        "SELECT v.memory_id, v.distance
-         FROM {} v
-         JOIN memories m ON m.id = v.memory_id
-         WHERE v.embedding MATCH ?1 AND k = ?2
-           AND EXISTS (
-               SELECT 1 FROM memory_embeddings e
-               WHERE e.memory_id = v.memory_id AND e.model = ?3 AND e.dimensions = ?4
-           )
-           AND {}
-         ORDER BY v.distance",
-        vec_table_name(profile.dimensions),
-        conditions.join(" AND ")
+        "SELECT memory_id, distance FROM {}
+         WHERE embedding MATCH ?{} AND k = ?{}
+           AND memory_id IN ({}) ORDER BY distance",
+        vec_table_name(profile),
+        count + 1,
+        count + 2,
+        scope.eligible_ids_sql(count + 3, count + 4)
     );
-    let refs = crate::db::to_sql_refs(&values);
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(refs.as_slice(), |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, f32>(1)?))
-    })?;
-    let mut hits = crate::db::query::collect_rows(rows)?
-        .into_iter()
-        .map(|(memory_id, distance)| VectorHit {
-            memory_id,
-            distance,
+    let rows = stmt.query_map(values.as_slice(), |row| {
+        Ok(VectorHit {
+            memory_id: row.get(0)?,
+            distance: row.get(1)?,
         })
-        .collect::<Vec<_>>();
-    // vec0 allows only the bare `ORDER BY distance` clause, so the
-    // deterministic tie-break happens here, matching the brute-force path.
+    })?;
+    let mut hits = crate::db::query::collect_rows(rows)?;
     hits.sort_by(|a, b| {
         a.distance
-            .partial_cmp(&b.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&b.distance)
             .then_with(|| a.memory_id.cmp(&b.memory_id))
     });
     Ok(Some(hits))

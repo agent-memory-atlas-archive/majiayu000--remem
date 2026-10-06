@@ -1,9 +1,10 @@
 use rusqlite::params;
 
 use super::super::vec_index::{
-    ensure_vec_index, knn_candidates, sync_vec_keep_only_profile, vec_index_ready,
+    ensure_vec_index, knn_candidates, sync_vec_keep_only_profile, vec_index_ready, vec_table_name,
 };
 use super::*;
+use crate::retrieval::embedding::EmbeddingProfile;
 
 fn setup_vec_conn() -> Result<VectorTestConn> {
     let ctx = setup_vector_conn()?;
@@ -25,7 +26,7 @@ fn served_by_knn(outcome: &VectorSearchOutcome) -> bool {
     outcome
         .timings
         .iter()
-        .all(|timing| timing.phase != "vector_select_candidates")
+        .all(|timing| timing.phase != "vector_exact_scan")
 }
 
 #[test]
@@ -176,7 +177,13 @@ fn re_upserting_same_memory_replaces_mirror_row() -> Result<()> {
     )?;
 
     let mirrored: i64 = ctx.conn.query_row(
-        &format!("SELECT COUNT(*) FROM memory_embedding_vec_{EMBEDDING_DIMENSIONS}"),
+        &format!(
+            "SELECT COUNT(*) FROM {}",
+            vec_table_name(EmbeddingProfile {
+                model: DEFAULT_EMBEDDING_MODEL,
+                dimensions: EMBEDDING_DIMENSIONS
+            })
+        ),
         [],
         |row| row.get(0),
     )?;
@@ -202,10 +209,7 @@ fn backfill_marks_profile_done_and_is_idempotent() -> Result<()> {
     assert!(vec_index_ready(&ctx.conn, profile.profile())?);
 
     let mirrored: i64 = ctx.conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM memory_embedding_vec_{}",
-            profile.profile().dimensions
-        ),
+        &format!("SELECT COUNT(*) FROM {}", vec_table_name(profile.profile())),
         [],
         |row| row.get(0),
     )?;
@@ -238,7 +242,10 @@ fn keep_only_profile_drops_other_dimension_tables() -> Result<()> {
     assert_eq!(stale_exists, 0);
     let active_exists: i64 = ctx.conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
-        [format!("memory_embedding_vec_{dimensions}")],
+        [vec_table_name(EmbeddingProfile {
+            model: DEFAULT_EMBEDDING_MODEL,
+            dimensions,
+        })],
         |row| row.get(0),
     )?;
     assert_eq!(active_exists, 1);

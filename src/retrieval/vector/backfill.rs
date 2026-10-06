@@ -405,16 +405,20 @@ fn upsert_prepared_memory_embedding_batch(
                 })?;
             }
         }
-        let mut by_dimensions: std::collections::BTreeMap<usize, Vec<i64>> =
+        let mut by_profile: std::collections::BTreeMap<(&str, usize), Vec<i64>> =
             std::collections::BTreeMap::new();
         for embedding in prepared {
-            by_dimensions
-                .entry(embedding.values.len())
+            by_profile
+                .entry((embedding.model.as_str(), embedding.values.len()))
                 .or_default()
                 .push(embedding.memory_id);
         }
-        for (dimensions, memory_ids) in by_dimensions {
-            super::vec_index::sync_vec_upsert_batch(conn, dimensions, &memory_ids)?;
+        for ((model, dimensions), memory_ids) in by_profile {
+            super::vec_index::sync_vec_upsert_batch(
+                conn,
+                crate::retrieval::embedding::EmbeddingProfile { model, dimensions },
+                &memory_ids,
+            )?;
         }
         crate::perf::push_elapsed(timings, "upsert_embeddings", upsert_start);
         Ok(())
@@ -440,5 +444,59 @@ fn upsert_prepared_memory_embedding_batch(
                 )),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod profile_batch_tests {
+    use super::*;
+
+    #[test]
+    fn same_dimension_profile_batch_keeps_old_vectors_and_updates_only_target_mirror() -> Result<()>
+    {
+        let conn = Connection::open_in_memory()?;
+        crate::migrate::run_migrations(&conn)?;
+        super::super::load_vec_extension(&conn)?;
+        conn.execute("INSERT INTO memories(id,project,title,content,memory_type,status,created_at_epoch,updated_at_epoch)
+            VALUES(1,'/repo','fixture','evidence','decision','active',1,1)", [])?;
+        let prepared = |model: &str, values: Vec<f32>| PreparedMemoryEmbedding {
+            memory_id: 1,
+            model: model.to_string(),
+            content_hash: "fixture".to_string(),
+            values,
+            updated_at_epoch: 1,
+        };
+        upsert_prepared_memory_embedding_batch(
+            &conn,
+            &[prepared("A", vec![1.0, 0.0])],
+            &mut vec![],
+        )?;
+        upsert_prepared_memory_embedding_batch(
+            &conn,
+            &[prepared("B", vec![0.0, 1.0])],
+            &mut vec![],
+        )?;
+        super::super::vec_index::ensure_vec_index(&conn)?;
+        upsert_prepared_memory_embedding_batch(
+            &conn,
+            &[prepared("B", vec![-1.0, 0.0])],
+            &mut vec![],
+        )?;
+        assert_eq!(super::super::embedding_count(&conn)?, 2);
+        for (model, expected) in [("A", 0.0_f32), ("B", 2.0_f32)] {
+            let hits = super::super::vec_index::knn_candidates(
+                &conn,
+                &[1.0, 0.0],
+                crate::retrieval::embedding::EmbeddingProfile {
+                    model,
+                    dimensions: 2,
+                },
+                super::super::VectorSearchFilters::default(),
+                10,
+            )?
+            .expect("completed profile");
+            assert_eq!(hits[0].distance, expected, "{model}");
+        }
+        Ok(())
     }
 }
