@@ -94,7 +94,12 @@ pub(super) fn title_has_continuity(left: &str, right: &str) -> bool {
 pub(super) fn title_is_specific(title: &str) -> bool {
     normalize_title(title)
         .split_whitespace()
+        .map(identity_token)
         .any(|token| !BROAD_TOKENS.contains(&token) && token.chars().any(char::is_alphanumeric))
+}
+
+fn identity_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| !ch.is_alphanumeric())
 }
 
 fn contains_title_phrase(container: &str, phrase: &str) -> bool {
@@ -212,6 +217,7 @@ pub(super) fn has_continuity_alias(
 fn meaningful_tokens(normalized: &str) -> BTreeSet<&str> {
     normalized
         .split_whitespace()
+        .map(identity_token)
         .filter(|token| !BROAD_TOKENS.contains(token))
         .filter(|token| !token.is_ascii() || token.len() >= 4)
         .collect()
@@ -223,7 +229,7 @@ fn token_is_strong_continuity_anchor(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_title, title_has_continuity};
+    use super::{normalize_title, title_has_continuity, title_is_specific};
 
     #[test]
     fn title_normalization_collapses_separator_noise() {
@@ -239,6 +245,9 @@ mod tests {
             ("Preview animation", "review"),
             ("Billing review", "review"),
             ("Security review", "review"),
+            ("Billing review!", "review!"),
+            ("Billing \"review\"", "\"review\""),
+            ("Billing “review”", "“review”"),
             (
                 "billing export cleanup",
                 "billing billing billing dashboard",
@@ -252,6 +261,9 @@ mod tests {
             "Billing export",
             "Billing export cleanup"
         ));
+        for broad in ["review!", "review?", "\"review\"", "“review”", "#review"] {
+            assert!(!title_is_specific(broad), "{broad}");
+        }
     }
 
     #[test]

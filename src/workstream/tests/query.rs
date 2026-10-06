@@ -114,9 +114,12 @@ fn parsed_title(title: &str) -> ParsedWorkStream {
 
 #[test]
 fn broad_title_upsert_preserves_unrelated_workstreams_and_links() {
-    for titles in [
-        vec!["Preview animation"],
-        vec!["Billing review", "Security review"],
+    for (titles, incoming) in [
+        (vec!["Preview animation"], "review"),
+        (vec!["Billing review", "Security review"], "review"),
+        (vec!["Billing review!"], "review!"),
+        (vec!["Billing \"review\""], "\"review\""),
+        (vec!["Billing “review”"], "“review”"),
     ] {
         let conn = Connection::open_in_memory().unwrap();
         setup_workstream_schema(&conn);
@@ -133,10 +136,10 @@ fn broad_title_upsert_preserves_unrelated_workstreams_and_links() {
             );
         }
         // The loose public lookup remains useful, but cannot authorize mutation.
-        assert!(find_matching_workstream(&conn, "test/proj", "review")
+        assert!(find_matching_workstream(&conn, "test/proj", incoming)
             .unwrap()
             .is_some());
-        let mut new = parsed_title("review");
+        let mut new = parsed_title(incoming);
         new.is_completed = true;
         new.progress = Some("different task completed".into());
         let outcome =
