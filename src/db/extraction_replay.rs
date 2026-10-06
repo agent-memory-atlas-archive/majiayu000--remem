@@ -420,6 +420,7 @@ pub(crate) fn archive_exact_replay_range_after_task_failure(
     range_id: i64,
     replay_task_id: i64,
     error: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<()> {
     let updated = conn.execute(
@@ -440,7 +441,7 @@ pub(crate) fn archive_exact_replay_range_after_task_failure(
         params![
             replay_task_id,
             crate::db::truncate_str(error, 2000),
-            crate::db::classify_failure(error).as_str(),
+            failure_class.as_str(),
             now,
             range_id
         ],
@@ -465,6 +466,7 @@ pub(crate) fn record_exhausted_replay_range(
     to_event_id: i64,
     _attempts: i64,
     err: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<i64> {
     conn.execute(
@@ -493,7 +495,7 @@ pub(crate) fn record_exhausted_replay_range(
             from_event_id,
             to_event_id,
             crate::db::truncate_str(err, 2000),
-            crate::db::classify_failure(err).as_str(),
+            failure_class.as_str(),
             now
         ],
     )?;

@@ -180,6 +180,11 @@ Explicit search is an inspection and recovery surface, so it may return
 labeled `legacy_unverified` memories; default SessionStart and CurrentTruth
 exclude those rows and record the reason.
 
+Malformed generated extraction responses retry with the existing bounded
+backoff while keeping the same source evidence. Invalid stored evidence still
+requires repair; exhausted model attempts preserve raw capture and replay
+ranges for inspection instead of accepting incomplete output.
+
 Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
 dropped or routed to review with a diagnosable reason.

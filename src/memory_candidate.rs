@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::db;
@@ -190,7 +190,8 @@ where
     let existing_preferences = load_candidate_prompt_preferences(conn, &task.project)?;
     let prompt = build_candidate_prompt(task, &batch, &existing_preferences);
     let response = generate(prompt).await?;
-    let candidates = parse_memory_candidates(&response)?;
+    let candidates = parse_memory_candidates(&response)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?;
     if candidates.is_empty() {
         if let Some(reason) = parse_defer_reason(&response) {
             return Ok(MemoryCandidateResult::Deferred { reason });
@@ -199,7 +200,10 @@ where
             enqueue_graph_followup(conn, task, batch.to_event_id)?;
             return Ok(MemoryCandidateResult::NoCandidates);
         }
-        bail!("malformed memory_candidate output: no candidates parsed");
+        return Err(db::model_output_error(
+            task.task_kind,
+            anyhow::anyhow!("malformed memory_candidate output: no candidates parsed"),
+        ));
     }
 
     let result = persist_candidates(conn, task, &batch, &candidates)?;

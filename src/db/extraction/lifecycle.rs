@@ -103,6 +103,7 @@ pub fn release_expired_extraction_task_leases(conn: &Connection) -> Result<usize
                 *task_id,
                 exact_owner,
                 "exact replay worker lease expired; rerun the locked exact recovery command",
+                crate::db::FailureClass::Transient,
                 now,
             )?;
         } else {
@@ -124,11 +125,28 @@ pub fn release_expired_extraction_task_leases(conn: &Connection) -> Result<usize
     Ok(expired.len())
 }
 
+#[cfg(test)]
 pub(crate) fn archive_claimed_exact_replay_task(
     conn: &Connection,
     task_id: i64,
     lease_owner: &str,
     error: &str,
+) -> Result<()> {
+    archive_claimed_exact_replay_task_with_class(
+        conn,
+        task_id,
+        lease_owner,
+        error,
+        crate::db::classify_failure(error),
+    )
+}
+
+pub(crate) fn archive_claimed_exact_replay_task_with_class(
+    conn: &Connection,
+    task_id: i64,
+    lease_owner: &str,
+    error: &str,
+    failure_class: crate::db::FailureClass,
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     archive_claimed_exact_replay_task_in_transaction(
@@ -136,6 +154,7 @@ pub(crate) fn archive_claimed_exact_replay_task(
         task_id,
         lease_owner,
         error,
+        failure_class,
         chrono::Utc::now().timestamp(),
     )?;
     tx.commit()?;
@@ -147,6 +166,7 @@ fn archive_claimed_exact_replay_task_in_transaction(
     task_id: i64,
     lease_owner: &str,
     error: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -175,7 +195,7 @@ fn archive_claimed_exact_replay_task_in_transaction(
          WHERE id = ?4 AND status = 'processing' AND lease_owner = ?5",
         params![
             crate::db::truncate_str(error, 2000),
-            crate::db::classify_failure(error).as_str(),
+            failure_class.as_str(),
             now,
             task_id,
             lease_owner
@@ -187,6 +207,7 @@ fn archive_claimed_exact_replay_task_in_transaction(
         replay_range_id,
         task_id,
         error,
+        failure_class,
         now,
     )
 }
@@ -275,7 +296,15 @@ pub fn defer_claimed_extraction_task(
     let now = chrono::Utc::now().timestamp();
     let next_attempt = task.attempts + 1;
     if next_attempt >= EXTRACTION_TASK_MAX_ATTEMPTS {
-        return exhaust_extraction_task(conn, task, lease_owner, next_attempt, reason, now);
+        return exhaust_extraction_task(
+            conn,
+            task,
+            lease_owner,
+            next_attempt,
+            reason,
+            crate::db::classify_failure(reason),
+            now,
+        );
     }
 
     let updated = conn.execute(
@@ -352,12 +381,55 @@ pub fn mark_claimed_extraction_task_failed_or_retry(
     err: &str,
     backoff_secs: i64,
 ) -> Result<()> {
+    mark_claimed_extraction_task_failed_or_retry_with_class(
+        conn,
+        task,
+        lease_owner,
+        err,
+        crate::db::classify_failure(err),
+        backoff_secs,
+    )
+}
+
+pub(crate) fn mark_claimed_extraction_task_error_or_retry(
+    conn: &Connection,
+    task: &ExtractionTask,
+    lease_owner: &str,
+    error: &anyhow::Error,
+    backoff_secs: i64,
+) -> Result<()> {
+    mark_claimed_extraction_task_failed_or_retry_with_class(
+        conn,
+        task,
+        lease_owner,
+        &error.to_string(),
+        crate::db::classify_failure_error(error),
+        backoff_secs,
+    )
+}
+
+fn mark_claimed_extraction_task_failed_or_retry_with_class(
+    conn: &Connection,
+    task: &ExtractionTask,
+    lease_owner: &str,
+    err: &str,
+    failure_class: crate::db::FailureClass,
+    backoff_secs: i64,
+) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     let next_attempt = task.attempts + 1;
-    if crate::db::classify_failure(err) == crate::db::FailureClass::Permanent
+    if failure_class == crate::db::FailureClass::Permanent
         || next_attempt >= EXTRACTION_TASK_MAX_ATTEMPTS
     {
-        return exhaust_extraction_task(conn, task, lease_owner, next_attempt, err, now);
+        return exhaust_extraction_task(
+            conn,
+            task,
+            lease_owner,
+            next_attempt,
+            err,
+            failure_class,
+            now,
+        );
     }
 
     let updated = conn.execute(

@@ -133,7 +133,8 @@ where
     let transcript_evidence = transcript_evidence::load_prompt_transcript_evidence(&range)?;
     let prompt = prompt::build_rollup_prompt(task, &range, &transcript_evidence);
     let response = summarize(prompt).await?;
-    let output = parse::parse_rollup_response(&response, &range)?;
+    let output = parse::parse_rollup_response(&response, &range)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?;
     let quarantined = persist::persist_session_rollup(
         conn,
         task,

@@ -130,7 +130,9 @@ where
     };
     let prompt = prompt::build_candidate_prompt(task, &batch)?;
     let response = generate(prompt).await?;
-    let parsed = match parse_user_context_candidate_response(&response)? {
+    let parsed = match parse_user_context_candidate_response(&response)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?
+    {
         UserContextCandidateResponse::NoCandidates => {
             return Ok(UserContextCandidateExtractResult::NoCandidates {
                 to_event_id: batch.to_event_id,
@@ -138,7 +140,8 @@ where
         }
         UserContextCandidateResponse::Candidates(candidates) => candidates,
     };
-    validate_candidate_sources(&batch, &parsed)?;
+    validate_candidate_sources(&batch, &parsed)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?;
     let summary = persist_candidates(conn, task, &batch, &parsed, policy)?;
     crate::log::info(
         "user-context-candidate",

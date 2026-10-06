@@ -68,6 +68,15 @@ Acceptance includes a malformed generated response followed by a valid response,
 bounded repeated malformed responses with preserved replay evidence, and a
 malformed source row that remains permanently failed without an AI retry.
 
+### Worker liveness (Refs #1105)
+
+A recent heartbeat is healthy only while the operating system confirms its
+process is alive, including on Windows. A once worker that has exited must not
+suppress a later Stop-hook launch for the heartbeat freshness window. Normal
+return, task error, and cancellation/unwind deactivate only that worker's own
+heartbeat while preserving its last diagnostic time. An unexpected process
+kill continues to use OS liveness and the existing expired-lease recovery.
+
 ## User-Visible Behavior
 
 - `remem status` / `remem doctor` split failure reporting into

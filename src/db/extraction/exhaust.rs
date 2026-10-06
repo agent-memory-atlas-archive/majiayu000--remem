@@ -15,11 +15,13 @@ pub(super) fn exhaust_extraction_task(
     lease_owner: &str,
     attempts: i64,
     err: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("begin extraction exhaustion transaction")?;
-    let result = exhaust_extraction_task_locked(conn, task, lease_owner, attempts, err, now);
+    let result =
+        exhaust_extraction_task_locked(conn, task, lease_owner, attempts, err, failure_class, now);
     let (session_id, skipped_through, replay_range) = match result {
         Ok(output) => {
             conn.execute_batch("COMMIT")
@@ -65,6 +67,7 @@ fn exhaust_extraction_task_locked(
     lease_owner: &str,
     attempts: i64,
     err: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<(Option<String>, i64, Option<i64>)> {
     let current = conn
@@ -120,7 +123,7 @@ fn exhaust_extraction_task_locked(
             params![
                 attempts,
                 crate::db::truncate_str(err, 2000),
-                crate::db::classify_failure(err).as_str(),
+                failure_class.as_str(),
                 now,
                 range_id
             ],
@@ -139,6 +142,7 @@ fn exhaust_extraction_task_locked(
             skipped_through,
             attempts,
             err,
+            failure_class,
             now,
         )?)
     } else {
@@ -173,7 +177,7 @@ fn exhaust_extraction_task_locked(
             next_attempts,
             skipped_through,
             crate::db::truncate_str(err, 2000),
-            crate::db::classify_failure(err).as_str(),
+            failure_class.as_str(),
             now,
             task.id,
             lease_owner

@@ -91,6 +91,17 @@ source failure remains permanent. Parser-consumer tests bind the typed marker
 to real generated-response errors rather than relying only on synthetic error
 strings.
 
+### 1.2 Cross-platform worker liveness (Refs #1105)
+
+Heartbeat freshness and OS process liveness are both required for health.
+Windows uses a query/synchronization-only process handle and a zero-timeout
+wait; it must not treat an arbitrary positive PID as alive. Once a startup
+heartbeat is recorded, an owner/PID-scoped guard clears that row's `pid` on
+normal return, error, and cancellation/unwind, without rewriting its last
+diagnostic timestamp or affecting another worker's row. Process termination
+that cannot run the guard remains covered by OS liveness and the existing
+lease-expiration recovery; no new database table or background timer is added.
+
 ### 2. Bounded auto-recovery
 
 Worker loop extension (no new daemon): once per cycle, pick up to N

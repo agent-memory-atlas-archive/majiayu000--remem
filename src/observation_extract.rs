@@ -157,7 +157,9 @@ where
 
     let prompt = build_extract_prompt(task, &range);
     let response = extract(prompt).await?;
-    let observations = match parse_observation_extract_response(&response)? {
+    let observations = match parse_observation_extract_response(&response)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?
+    {
         ObservationExtractResponse::NoObservations => {
             promote_verified_procedures(conn, task)?;
             return Ok(ObservationExtractResult::NoObservations);

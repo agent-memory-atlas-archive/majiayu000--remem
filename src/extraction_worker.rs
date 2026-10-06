@@ -91,11 +91,11 @@ pub(crate) async fn run_next(
         Ok(Err(e)) => {
             let msg = e.to_string();
             let backoff = retry_backoff_secs(task.attempts);
-            db::mark_claimed_extraction_task_failed_or_retry(
+            db::mark_claimed_extraction_task_error_or_retry(
                 &conn,
                 &task,
                 lease_owner,
-                &msg,
+                &e,
                 backoff,
             )?;
             crate::log::warn(
@@ -188,9 +188,12 @@ pub(crate) async fn run_claimed_exact(
             lease_owner,
             &format!("exact replay waiting: {reason}"),
         ),
-        Ok(Err(error)) => {
-            archive_exact_outcome(&task, lease_owner, &format!("exact replay failed: {error}"))
-        }
+        Ok(Err(error)) => archive_exact_outcome_with_class(
+            &task,
+            lease_owner,
+            &format!("exact replay failed: {error}"),
+            db::classify_failure_error(&error),
+        ),
         Err(_) => archive_exact_outcome(
             &task,
             lease_owner,
@@ -204,8 +207,23 @@ pub(crate) fn exact_replay_task_active() -> bool {
 }
 
 fn archive_exact_outcome(task: &db::ExtractionTask, lease_owner: &str, error: &str) -> Result<()> {
+    archive_exact_outcome_with_class(task, lease_owner, error, db::classify_failure(error))
+}
+
+fn archive_exact_outcome_with_class(
+    task: &db::ExtractionTask,
+    lease_owner: &str,
+    error: &str,
+    failure_class: db::FailureClass,
+) -> Result<()> {
     let conn = db::open_db()?;
-    db::archive_claimed_exact_replay_task(&conn, task.id, lease_owner, error)?;
+    db::archive_claimed_exact_replay_task_with_class(
+        &conn,
+        task.id,
+        lease_owner,
+        error,
+        failure_class,
+    )?;
     crate::log::error(
         "worker",
         &format!(
