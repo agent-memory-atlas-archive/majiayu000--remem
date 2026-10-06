@@ -48,6 +48,26 @@ surface that #381/#383 evidence collection depends on.
 - No automatic row deletion; purging archived rows is an explicit
   `remem cleanup` action, consistent with invalidate-never-delete.
 
+### Generated Output Validation (Refs #1105)
+
+A provider can successfully return text that fails the extraction output
+contract. This is a recoverable model-generation failure, not proof that the
+stored source evidence is malformed. Observation, session-rollup, memory,
+user-context, and graph candidate output validation uses the existing bounded
+transient retry budget. A successful retry must consume the original evidence
+range; an unsuccessful retry must not advance its cursor before exhaustion.
+
+Malformed stored evidence, unsupported source/schema versions, and missing
+evidence keep their permanent-failure behavior. Output retries do not relax
+strict parsing, evidence binding, poisoning checks, or promotion policy.
+Exhausted generated-output failures still retain raw evidence and replay ranges;
+exact archived/quarantined replay keeps its single-attempt, explicit-profile
+governance and never becomes ordinary daemon work after failure.
+
+Acceptance includes a malformed generated response followed by a valid response,
+bounded repeated malformed responses with preserved replay evidence, and a
+malformed source row that remains permanently failed without an AI retry.
+
 ## User-Visible Behavior
 
 - `remem status` / `remem doctor` split failure reporting into

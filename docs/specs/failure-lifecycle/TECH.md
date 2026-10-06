@@ -65,6 +65,32 @@ Classification maps existing error strings at failure-marking time:
 The mapping table lives in one module with unit tests per pattern, so new
 error strings get classified in one place.
 
+### 1.1 Generated output versus source failures (Refs #1105)
+
+Current extraction parsers wrap only validation of newly generated text in a
+typed `ModelOutputError`, carrying its `ExtractionTaskKind` and original error.
+The worker classifies the error before formatting it for storage: that typed
+error is transient even when its diagnostic includes `malformed`, `schema`, or
+`missing evidence`. Loading stored source rows and applying database mutations
+remain outside this wrapper and retain the existing permanent/string fallback.
+The wrapper is applied at the generation-consumer boundary, not to arbitrary
+provider, persistence, or entire task errors.
+
+Lease-owned extraction retry/exhaustion passes the resolved `FailureClass`
+explicitly through the task and replay-range writes. Reformatting an error must
+not change its persisted class. Existing string-based entry points stay
+compatible for legacy/admin callers. Normal retry counts/backoff, exhaustion
+cursor advancement, raw retention, replay eligibility, and archived exact replay
+acknowledgement are unchanged. Strict validation remains fail-closed; retries
+never persist partially parsed output.
+
+Focused tests must prove that an output-schema failure preserves the cursor and
+raw evidence on the first attempt, that repeated failures exhaust into a
+transient replay range at the existing cap, and that an unwrapped malformed
+source failure remains permanent. Parser-consumer tests bind the typed marker
+to real generated-response errors rather than relying only on synthetic error
+strings.
+
 ### 2. Bounded auto-recovery
 
 Worker loop extension (no new daemon): once per cycle, pick up to N
