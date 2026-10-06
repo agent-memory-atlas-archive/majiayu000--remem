@@ -85,11 +85,16 @@ to the attempted chunk. Later events remain processable. A replay range retains
 its original endpoints as audit evidence; a failed replay cannot skip its failed
 chunk and later report the parent range as replayed.
 
-An exact archived replay may process several chunks of the same range and profile
-under one lease and one overall timeout. Each fully successful chunk has a durable
-success checkpoint. A later explicitly authorized replay resumes that verified
-prefix; historical cursors are not treated as proof of success. Any unsuccessful
-exact attempt still returns the range to archived quarantine. Artifact writes
+An exact archived replay may process several chunks and already-existing linked
+successors of the same range, under one explicit profile and one 420-second total
+timeout. Admission validates and claims the whole existing family atomically;
+an unrelated scope, range, or owner leaves the original archive unchanged. Each
+member resumes only its own durable successful checkpoint and immutable original
+lower bound. A completed primary task is not proof that its successors succeeded.
+Historical cursors are not treated as proof of success, and an unverifiable
+historical lower bound rejects recovery instead of widening the source range.
+Any unsuccessful exact attempt preserves each member's verified progress and
+returns unfinished owned work and the range to archived quarantine. Artifact writes
 retain their existing at-least-once, idempotent recovery behavior: a crash before
 the final success checkpoint may repeat a chunk, and must not skip its effects.
 
@@ -248,10 +253,13 @@ chunk with later evidence pending, or terminal failure from persisted state.
   as read-only dry-run validation. Neither acknowledgement widens active-task,
   terminal, or batch eligibility. An exact replay worker validates the profile
   and acquires the worker singleton before any write, then revalidates,
-  requeues, and claims only that target in one transaction. It processes only
-  the claimed task. Any non-successful exact attempt, including expired exact
-  worker ownership after interruption, returns the task and range to archived
-  quarantine rather than exposing default-profile work to a daemon.
+  requeues, and claims that range's existing task family in one transaction.
+  It processes only those validated members and suppresses new follow-up tasks.
+  Any non-successful exact attempt, including expired exact worker ownership
+  after interruption, archives unfinished owned members and quarantines the
+  range without exposing default-profile work to a daemon. A successful member
+  remains checkpointed when a later member fails; subsequent explicit recovery
+  resumes the remaining work without repeating its completed prefix.
 - Doctor on a store with 1000 ordinary archived-history rows + 2 fresh failures
   reports the 2 actionable failures prominently, archived count secondary, and
   exits with the severity driven by the 2. Archived legacy rows that require
