@@ -103,9 +103,7 @@ mod tests {
             }
             db::mark_claimed_extraction_task_failed_or_retry(&conn, &task, "worker-a", cause, 30)?;
             log_failure_transition(&conn, id, cause)?;
-            let date = chrono::Local::now().format("%Y-%m-%d");
-            let log =
-                std::fs::read_to_string(data.path.join("logs").join(format!("remem-{date}.log")))?;
+            let log = std::fs::read_to_string(data.path.join("remem.log"))?;
             let line = log
                 .lines()
                 .find(|line| line.contains(&format!("extraction id={id} failed:")))
