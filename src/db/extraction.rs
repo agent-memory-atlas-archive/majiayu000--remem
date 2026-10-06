@@ -1,13 +1,18 @@
 use crate::db::ExtractionTaskKind;
 
 mod enqueue;
+mod exact_family;
 mod exhaust;
 mod input;
 mod lifecycle;
 mod loaders;
 mod progress;
+mod replay_member;
 
 pub use enqueue::*;
+pub(crate) use exact_family::{
+    finish_claimed_exact_replay_family, load_claimed_exact_replay_family,
+};
 pub(crate) use input::{
     bound_captured_event_attempt, extraction_input_bytes, extraction_prompt_fits,
     log_extraction_input, CAPTURED_EVENT_BATCH_LIMIT, EXTRACTION_INPUT_MAX_BYTES,
@@ -16,6 +21,9 @@ pub(crate) use input::{
 pub use lifecycle::*;
 pub use progress::mark_extraction_task_done;
 pub(crate) use progress::{checkpoint_claimed_extraction_task_chunk, replay_resume_event_id};
+pub(crate) use replay_member::{
+    restore_replay_family_members, validated_replay_member, validated_replay_members,
+};
 
 pub const EXTRACTION_TASK_MAX_ATTEMPTS: i64 = 5;
 
@@ -40,6 +48,8 @@ pub struct ExtractionTask {
 
 #[cfg(test)]
 mod progress_tests;
+#[cfg(test)]
+mod replay_family_tests;
 #[cfg(test)]
 mod retry_regression_tests;
 #[cfg(test)]

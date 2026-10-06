@@ -13,7 +13,7 @@ pub(super) fn load_claimed_extraction_task(
         "SELECT t.id, t.task_kind, t.host_id, t.workspace_id, t.project_id, t.session_row_id,
                 h.name, p.project_path, s.session_id,
                 t.priority, t.cursor_event_id, t.high_watermark_event_id, t.attempts,
-                t.replay_range_id
+                t.replay_range_id, t.lease_owner
          FROM extraction_tasks t
          JOIN hosts h ON h.id = t.host_id
          JOIN projects p ON p.id = t.project_id
@@ -36,11 +36,22 @@ pub(super) fn load_claimed_extraction_task(
                 row.get::<_, Option<i64>>(11)?,
                 row.get::<_, i64>(12)?,
                 row.get::<_, Option<i64>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         },
     )?;
 
-    let ai_profile = load_task_ai_profile(conn, row.2, row.4, row.5, row.11)?;
+    let ai_profile = if row
+        .14
+        .as_deref()
+        .is_some_and(crate::db::is_exact_replay_worker_owner)
+    {
+        // Exact admission has already resolved the explicit profile. Historical
+        // captured payloads must not choose or block this governed recovery.
+        None
+    } else {
+        load_task_ai_profile(conn, row.2, row.4, row.5, row.11)?
+    };
     Ok(ExtractionTask {
         id: row.0,
         task_kind: ExtractionTaskKind::from_db(&row.1)?,

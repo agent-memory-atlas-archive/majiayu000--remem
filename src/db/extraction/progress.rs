@@ -103,8 +103,20 @@ fn validate_completion(
     lease_owner: &str,
     completed: Option<i64>,
     now: i64,
-    exact_canonical: bool,
+    exact: bool,
 ) -> Result<()> {
+    let range_id: Option<i64> = conn.query_row(
+        "SELECT replay_range_id FROM extraction_tasks WHERE id = ?1",
+        [task_id],
+        |r| r.get(0),
+    )?;
+    if let Some(range_id) = range_id {
+        let member = super::replay_member::validated_replay_member(conn, task_id, range_id)?;
+        ensure!(
+            completed.is_some_and(|end| end >= member.from && end <= member.to),
+            "replay member {task_id} completion exceeds its original evidence range"
+        );
+    }
     let valid = conn
         .query_row(
             "SELECT CASE WHEN ?3 IS NULL THEN t.high_watermark_event_id IS NULL
@@ -123,12 +135,12 @@ fn validate_completion(
                      AND t.high_watermark_event_id BETWEEN r.from_event_id AND r.to_event_id
                      AND (r.replay_task_id IS NOT t.id OR
                          (r.task_kind = t.task_kind AND r.to_event_id = t.high_watermark_event_id))
-                     AND (?5 = 0 OR (r.replay_task_id = t.id AND r.status = 'requeued'))
+                     AND (?5 = 0 OR r.status = 'requeued')
                      AND ?3 BETWEEN r.from_event_id AND r.to_event_id)) END
          FROM extraction_tasks t
          WHERE t.id = ?1 AND t.lease_owner = ?2 AND t.status = 'processing'
            AND t.lease_expires_epoch > ?4",
-            params![task_id, lease_owner, completed, now, exact_canonical],
+            params![task_id, lease_owner, completed, now, exact],
             |row| row.get::<_, bool>(0),
         )
         .optional()?;
@@ -142,28 +154,18 @@ fn validate_completion(
 /// Only a checkpoint on this range's linked replay task proves a successful
 /// prefix. A historical cursor (including one advanced by exhaustion) cannot.
 pub(crate) fn replay_resume_event_id(conn: &Connection, range_id: i64) -> Result<Option<i64>> {
-    let (completed, valid): (Option<i64>, bool) = conn.query_row(
-        "SELECT t.completed_event_id, CASE WHEN t.completed_event_id IS NULL THEN 1 ELSE
-             t.status IN ('done', 'failed')
-             AND t.replay_range_id = r.id AND t.task_kind = r.task_kind
-             AND t.host_id = r.host_id AND t.workspace_id = r.workspace_id
-             AND t.project_id = r.project_id AND t.session_row_id IS r.session_row_id
-             AND t.high_watermark_event_id = r.to_event_id
-             AND t.cursor_event_id >= t.completed_event_id
-             AND t.completed_event_id BETWEEN r.from_event_id AND r.to_event_id
-             AND EXISTS (SELECT 1 FROM captured_events e
-                 WHERE e.id = t.completed_event_id AND e.host_id = r.host_id
-                   AND e.project_id = r.project_id AND e.session_row_id IS r.session_row_id)
-             END
-         FROM extraction_replay_ranges r
-         LEFT JOIN extraction_tasks t ON t.id = r.replay_task_id
-         WHERE r.id = ?1",
+    let task_id: Option<i64> = conn.query_row(
+        "SELECT replay_task_id FROM extraction_replay_ranges WHERE id = ?1",
         [range_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
+    let Some(task_id) = task_id else {
+        return Ok(None);
+    };
+    let member = super::replay_member::validated_replay_member(conn, task_id, range_id)?;
     ensure!(
-        valid,
+        member.completed.is_none() || matches!(member.status.as_str(), "done" | "failed"),
         "invalid successful checkpoint for extraction replay range {range_id}"
     );
-    Ok(completed)
+    Ok(member.completed)
 }

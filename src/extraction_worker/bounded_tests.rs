@@ -2,6 +2,8 @@ use std::cell::RefCell;
 
 use super::*;
 
+mod family;
+
 fn task() -> db::ExtractionTask {
     db::ExtractionTask {
         id: 1,

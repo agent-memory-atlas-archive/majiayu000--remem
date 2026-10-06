@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::db::extraction_replay::mark_replay_range_failed;
 
@@ -102,6 +102,17 @@ pub fn release_expired_extraction_task_leases(conn: &Connection) -> Result<usize
             .as_deref()
             .filter(|owner| crate::db::is_exact_replay_worker_owner(owner))
         {
+            let still_owned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM extraction_tasks WHERE id = ?1
+                 AND status = 'processing' AND lease_owner = ?2)",
+                params![task_id, exact_owner],
+                |r| r.get(0),
+            )?;
+            if !still_owned {
+                // An earlier member in this snapshot already archived the
+                // entire admitted family in this same transaction.
+                continue;
+            }
             archive_claimed_exact_replay_task_in_transaction(
                 &tx,
                 *task_id,
@@ -152,7 +163,7 @@ pub(crate) fn archive_claimed_exact_replay_task_with_class(
     error: &str,
     failure_class: crate::db::FailureClass,
 ) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     archive_claimed_exact_replay_task_in_transaction(
         &tx,
         task_id,
@@ -173,43 +184,10 @@ fn archive_claimed_exact_replay_task_in_transaction(
     failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<()> {
-    anyhow::ensure!(
-        crate::db::is_exact_replay_worker_owner(lease_owner),
-        "exact replay archive requires an exact replay worker owner"
-    );
-    let replay_range_id: i64 = conn.query_row(
-        "SELECT replay_range_id
-         FROM extraction_tasks
-         WHERE id = ?1 AND status = 'processing' AND lease_owner = ?2",
-        params![task_id, lease_owner],
-        |row| row.get(0),
-    )?;
-    let updated = conn.execute(
-        "UPDATE extraction_tasks
-         SET status = 'failed',
-             attempts = attempts + 1,
-             next_retry_epoch = NULL,
-             lease_owner = NULL,
-             lease_expires_epoch = NULL,
-             last_error = ?1,
-             failure_class = ?2,
-             failed_at_epoch = COALESCE(failed_at_epoch, ?3),
-             archived_at_epoch = ?3,
-             updated_at_epoch = ?3
-         WHERE id = ?4 AND status = 'processing' AND lease_owner = ?5",
-        params![
-            crate::db::truncate_str(error, 2000),
-            failure_class.as_str(),
-            now,
-            task_id,
-            lease_owner
-        ],
-    )?;
-    ensure_task_updated(updated, task_id)?;
-    crate::db::extraction_replay::archive_exact_replay_range_after_task_failure(
+    super::exact_family::archive_owned_exact_family(
         conn,
-        replay_range_id,
         task_id,
+        lease_owner,
         error,
         failure_class,
         now,

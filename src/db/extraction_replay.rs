@@ -1,5 +1,5 @@
 use anyhow::{ensure, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 
 use crate::db::ExtractionTaskKind;
@@ -215,7 +215,7 @@ pub fn retry_extraction_replay_range(
     range_id: i64,
     acknowledge_quarantine: bool,
 ) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     ensure_extraction_replay_range_retryable(&tx, range_id, acknowledge_quarantine, false)?;
     enqueue_replay_extraction_task(&tx, range_id, acknowledge_quarantine)?;
     tx.commit()?;
@@ -234,13 +234,21 @@ pub(crate) fn retry_and_claim_extraction_replay_range(
         crate::db::is_exact_replay_worker_owner(lease_owner),
         "exact replay recovery requires an exact replay worker owner"
     );
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     ensure_extraction_replay_range_retryable(
         &tx,
         range_id,
         acknowledge_quarantine,
         include_archived,
     )?;
+    let now = chrono::Utc::now().timestamp();
+    for member in crate::db::validated_replay_members(&tx, range_id)? {
+        ensure!(
+            member.next_retry_epoch.is_none_or(|retry| retry <= now),
+            "replay member {} is not retry-ready for exact claim",
+            member.id
+        );
+    }
     let task_id = enqueue_replay_extraction_task(&tx, range_id, acknowledge_quarantine)?;
     let task = crate::db::claim_extraction_task_by_id_in_transaction(
         &tx,
@@ -253,6 +261,20 @@ pub(crate) fn retry_and_claim_extraction_replay_range(
             "extraction replay task {task_id} is not pending and retry-ready for exact claim"
         )
     })?;
+    let lease_expires: i64 = tx.query_row(
+        "SELECT lease_expires_epoch FROM extraction_tasks WHERE id = ?1",
+        [task_id],
+        |r| r.get(0),
+    )?;
+    tx.execute(
+        "UPDATE extraction_tasks SET status = 'processing', lease_owner = ?1,
+             lease_expires_epoch = ?2, updated_at_epoch = ?3
+         WHERE replay_range_id = ?4 AND status = 'pending'
+           AND lease_owner IS NULL AND lease_expires_epoch IS NULL
+           AND (next_retry_epoch IS NULL OR next_retry_epoch <= ?3)",
+        params![lease_owner, lease_expires, now, range_id],
+    )?;
+    crate::db::load_claimed_exact_replay_family(&tx, task_id, lease_owner)?;
     tx.commit()?;
     Ok(task)
 }
@@ -312,6 +334,13 @@ pub(crate) fn enqueue_replay_extraction_task(
     range_id: i64,
     acknowledge_quarantine: bool,
 ) -> Result<i64> {
+    if conn.is_autocommit() {
+        let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+        ensure_extraction_replay_range_retryable(&tx, range_id, acknowledge_quarantine, false)?;
+        let id = enqueue_replay_extraction_task(&tx, range_id, acknowledge_quarantine)?;
+        tx.commit()?;
+        return Ok(id);
+    }
     let (task_kind, host_id, workspace_id, project_id, session_row_id, from_event_id, to_event_id) =
         conn.query_row(
             "SELECT task_kind, host_id, workspace_id, project_id, session_row_id,
@@ -337,6 +366,7 @@ pub(crate) fn enqueue_replay_extraction_task(
         anyhow::anyhow!("extraction replay range {range_id} is missing session_row_id")
     })?;
     let completed_event_id = crate::db::replay_resume_event_id(conn, range_id)?;
+    crate::db::restore_replay_family_members(conn, range_id)?;
     let task_kind_value = ExtractionTaskKind::from_db(&task_kind)?;
     let now = chrono::Utc::now().timestamp();
     let idempotency_key =
@@ -346,16 +376,17 @@ pub(crate) fn enqueue_replay_extraction_task(
          (task_kind, host_id, workspace_id, project_id, session_row_id, priority, status,
           idempotency_key, cursor_event_id, high_watermark_event_id, attempts,
           next_retry_epoch, lease_owner, lease_expires_epoch, last_error, created_at_epoch,
-          updated_at_epoch, replay_range_id, completed_event_id)
+          updated_at_epoch, replay_range_id, completed_event_id, replay_from_event_id)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, 0, NULL, NULL, NULL, NULL,
-                 ?10, ?10, ?11, ?12)
+                 ?10, ?10, ?11, ?12, ?13)
          ON CONFLICT(idempotency_key) DO UPDATE SET
              status = CASE
-                 WHEN extraction_tasks.status IN ('done', 'failed') THEN 'pending'
+                 WHEN extraction_tasks.status IN ('pending', 'done', 'failed') THEN 'pending'
                  ELSE extraction_tasks.status
              END,
              cursor_event_id = excluded.cursor_event_id,
              completed_event_id = excluded.completed_event_id,
+             replay_from_event_id = COALESCE(extraction_tasks.replay_from_event_id, excluded.replay_from_event_id),
              high_watermark_event_id = excluded.high_watermark_event_id,
              attempts = CASE
                  WHEN extraction_tasks.status IN ('done', 'failed') THEN 0
@@ -383,13 +414,16 @@ pub(crate) fn enqueue_replay_extraction_task(
              END,
              replay_range_id = excluded.replay_range_id,
              updated_at_epoch = excluded.updated_at_epoch
-         WHERE extraction_tasks.status IN ('done', 'failed')
+         WHERE extraction_tasks.status IN ('pending', 'done', 'failed')
+           AND extraction_tasks.lease_owner IS NULL AND extraction_tasks.lease_expires_epoch IS NULL
            AND extraction_tasks.task_kind = excluded.task_kind
            AND extraction_tasks.host_id = excluded.host_id
            AND extraction_tasks.workspace_id = excluded.workspace_id
            AND extraction_tasks.project_id = excluded.project_id
            AND extraction_tasks.session_row_id IS excluded.session_row_id
-           AND extraction_tasks.replay_range_id = excluded.replay_range_id",
+           AND extraction_tasks.replay_range_id = excluded.replay_range_id
+           AND (extraction_tasks.replay_from_event_id IS NULL
+                OR extraction_tasks.replay_from_event_id = excluded.replay_from_event_id)",
         params![
             task_kind,
             host_id,
@@ -402,7 +436,8 @@ pub(crate) fn enqueue_replay_extraction_task(
             to_event_id,
             now,
             range_id,
-            completed_event_id
+            completed_event_id,
+            from_event_id
         ],
     )?;
     ensure!(
@@ -440,7 +475,6 @@ pub(crate) fn archive_exact_replay_range_after_task_failure(
     let updated = conn.execute(
         "UPDATE extraction_replay_ranges
          SET status = 'quarantined',
-             replay_task_id = ?1,
              last_error = ?2,
              failure_class = ?3,
              failed_at_epoch = COALESCE(failed_at_epoch, ?4),
