@@ -104,6 +104,11 @@ known categories contribute and cost coverage is partial. Invalid usage
 does not contribute a manufactured cost. Missing usage remains partial
 cost coverage even when its zero placeholder could be multiplied by a
 known rate. Invalid/non-finite cost calculations become unpriced errors.
+Text-estimated usage retains its calculated amount but its cost status is
+always partial. Per-turn pricing preserves that state when estimated and
+observed parts are combined. Aggregates defensively count estimated,
+missing, invalid, and legacy usage as incomplete even if an inconsistent
+stored cost-status label claims complete coverage.
 
 The shared `db::query::ai_usage` aggregate path exposes additive coverage
 counts for complete/partial/missing/invalid/estimated/legacy usage, failed

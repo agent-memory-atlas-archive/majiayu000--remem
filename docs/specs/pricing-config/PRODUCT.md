@@ -74,8 +74,11 @@ an explicit global override; it does not identify the model Codex selected.
 Usage summaries, daily/weekly and source groups, API stats, latest-session
 status, and timeline reports present the known priced portion alongside
 coverage counts. They must not present an unpriced or partly priced attempt
-as a complete zero-dollar estimate. These are local estimates, not provider
-invoices. Historical rows retain their counters and costs with unverified
+as a complete zero-dollar estimate. Text-length estimates retain their
+calculated amount but always have incomplete cost coverage, including when
+combined with observed usage; they do not establish provider counters.
+These are local estimates, not provider invoices. Historical rows retain
+their counters and costs with unverified
 completeness; old provenance labels cannot reconstruct absent evidence.
 
 ## Done when
