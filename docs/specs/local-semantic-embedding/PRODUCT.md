@@ -72,6 +72,27 @@ semantic match older than 4,096 newer rows. No model/default/weight changes or
 live host/API runs are required. This bounded correction does not complete the
 parked retrieval-router or broader shared-engine work.
 
+## Backfill source consistency (2026-10-06)
+
+Background embedding work must not replace a newer foreground vector with a
+vector generated from an older memory or enrichment snapshot. A completed model
+call is eligible to commit only while the exact source passage is still current
+and the memory remains in a searchable lifecycle state. Changed, deleted, and
+quarantined sources discard that result; a changed source without a current
+vector remains pending for a later bounded batch.
+
+Pending work and coverage compare the stored vector's versioned input hash with
+the current canonical passage and effective enrichment. Equal or newer wall-clock
+timestamps do not establish consistency. Existing incorrect or unknown hashes
+are repaired through the existing explicit backfill limits, with no model calls
+or source rewrites during status inspection or schema migration.
+
+Acceptance includes a two-connection SQLite barrier that orders old selection,
+foreground memory/vector update, then old-result commit; same-second changes;
+enrichment changes; deletion/quarantine; and legacy mismatches repaired in bounded
+batches. Skipped work consumes the selected-work budget and must not prevent a
+later batch from advancing past deleted or quarantined candidates.
+
 ## Non-Goals
 
 - No approximate ANN index. The shipped sqlite-vec exact index and portable

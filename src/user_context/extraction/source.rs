@@ -175,6 +175,17 @@ pub(super) fn source_evidence_text(
     batch: &CandidateSourceBatch,
     candidate: &ParsedUserContextCandidate,
 ) -> Option<String> {
+    // Keep a whole protective clause within the stored preview boundary. Its
+    // extraction gate still validates every cited event, including events that
+    // do not contribute this preview.
+    let preview_count =
+        if crate::user_context::non_retention::prevention::constraint_key(&candidate.claim_text)
+            .is_some()
+        {
+            1
+        } else {
+            usize::MAX
+        };
     let parts = batch
         .events_for_candidate(candidate)
         .into_iter()
@@ -182,6 +193,7 @@ pub(super) fn source_evidence_text(
             candidate.source_kind != "inferred_from_behavior" || is_behavior_source_event(event)
         })
         .filter_map(|event| evidence_preview_for_event(&event.content, candidate))
+        .take(preview_count)
         .collect::<Vec<_>>();
     let preview = parts.join("\n");
     (!preview.is_empty()).then_some(preview)
@@ -212,6 +224,15 @@ fn evidence_preview_for_event(
     content: &str,
     candidate: &ParsedUserContextCandidate,
 ) -> Option<String> {
+    // Preserve the exact protective clause, including Chinese text. The
+    // extraction gate separately checks the actual source event's authorship.
+    if let Some(key) =
+        crate::user_context::non_retention::prevention::constraint_key(&candidate.claim_text)
+    {
+        return (crate::user_context::non_retention::prevention::constraint_key(content)
+            == Some(key))
+        .then(|| content.trim().to_string());
+    }
     let claim_tokens = preview_match_tokens(&candidate.claim_text);
     if claim_tokens.is_empty() {
         return None;

@@ -103,6 +103,34 @@ in-scope result; deleted/suppressed/excluded rows; exact-vs-KNN rankings; and an
 automatic context semantic target older than 4,096 eligible newer memories.
 Tests use fabricated vectors or feature-hash in isolated temporary databases.
 
+## Backfill source consistency (2026-10-06)
+
+Reuse `memory_index_hash` and `memory_embeddings.content_hash`; do not add a
+second source version or migration. Selection streams eligible memories and the
+target profile's stored hash, recomputes the canonical passage plus the effective
+`search_context` (only when its source hash is present), and retains at most the
+requested number of mismatches. Pending counts and fresh coverage use the same
+comparison. These read-only checks may scan all eligible source rows and hash
+their passage bytes; this is an explicit linear consistency cost, not a query
+performance optimization. The application retains one scanned row plus the
+selected batch; embedding generation and writes remain bounded by batch/limit.
+
+Model calls finish outside the write transaction. The prepared batch retains its
+exact input fields. An atomic `INSERT ... SELECT ... ON CONFLICT DO UPDATE`
+checks those fields, effective enrichment and searchable status before each
+write, inside the existing batch savepoint. Only successful CAS rows synchronize
+their derived profile index and count as processed. A mismatch is a discarded
+calculation, not successful indexing; the source hash comparison keeps any
+remaining inconsistency pending. Empty selection ends a run, while selected but
+skipped work counts against the attempt limit so concurrent edits cannot create
+an infinite retry loop or make a deleted batch strand later eligible rows.
+
+Existing incorrect/empty hashes require no eager upgrade-time work: explicit
+backfill discovers them even when vector timestamps are newer than source
+timestamps and repairs only the caller's bounded selection. Regression tests use
+real migrated SQLite connections, barriers, and fabricated or feature-hash
+vectors; no live provider is required.
+
 ## Phase 1: Provider Contract
 
 ### Config

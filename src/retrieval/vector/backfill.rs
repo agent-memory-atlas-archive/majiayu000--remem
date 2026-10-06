@@ -1,15 +1,16 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
 use crate::retrieval::embedding::{
     EmbeddingBackfillTarget, EmbeddingConfig, EmbeddingFallbackCache, EmbeddingProviderStatus,
 };
 
 use super::reindex::{
+    execute_prepared_embedding_upsert, memory_embedding_source_counts,
     prepare_memory_embedding_batch, select_memory_embedding_reindex_candidates,
-    PreparedMemoryEmbedding,
+    PreparedMemoryEmbedding, UPSERT_CURRENT_EMBEDDING_SQL,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,12 +202,14 @@ pub fn reindex_memory_embeddings(conn: &Connection, limit: i64) -> Result<usize>
         let batch_limit = remaining_limit.min(super::EMBEDDING_REINDEX_WRITE_BATCH_SIZE as i64);
         let report =
             reindex_memory_embeddings_with_session_report(conn, batch_limit, &mut session)?;
-        if report.processed == 0 {
+        if report.selected == 0 {
             break;
         }
         processed += report.processed;
-        remaining_limit -= report.processed as i64;
-        if report.processed < batch_limit as usize {
+        // Changed/deleted sources still consumed model work. Charge selection,
+        // and let a full skipped batch advance to later eligible memories.
+        remaining_limit -= report.selected as i64;
+        if report.selected < batch_limit as usize {
             break;
         }
     }
@@ -302,7 +305,7 @@ fn validate_prepared_embedding_profiles(
         if embedding.model != target.model || actual_dimensions != target.dimensions {
             anyhow::bail!(
                 "pinned embedding profile changed while preparing memory id={}: expected model={} dimensions={}, got model={} dimensions={}; refusing to write mixed backfill batch",
-                embedding.memory_id,
+                embedding.source.id,
                 target.model,
                 target.dimensions,
                 embedding.model,
@@ -358,22 +361,12 @@ pub fn pending_memory_embedding_reindex_count_for_target(
     {
         return Ok(0);
     }
-    Ok(conn.query_row(
-        "SELECT COUNT(*)
-         FROM memories m
-         LEFT JOIN memory_embeddings e
-           ON e.memory_id = m.id
-          AND e.model = ?1
-          AND e.dimensions = ?2
-         WHERE (e.memory_id IS NULL
-                OR e.updated_at_epoch < m.updated_at_epoch)
-           AND m.status IN ('active', 'stale', 'archived')",
-        params![target.model.as_str(), target.dimensions as i64],
-        |row| row.get(0),
-    )?)
+    let (total, fresh) =
+        memory_embedding_source_counts(conn, &target.model, Some(target.dimensions))?;
+    Ok(total - fresh)
 }
 
-fn upsert_prepared_memory_embedding_batch(
+pub(super) fn upsert_prepared_memory_embedding_batch(
     conn: &Connection,
     prepared: &[PreparedMemoryEmbedding],
     timings: &mut Vec<crate::perf::PhaseTiming>,
@@ -381,37 +374,31 @@ fn upsert_prepared_memory_embedding_batch(
     if prepared.is_empty() {
         return Ok(0);
     }
-    let prepared_count = prepared.len();
     conn.execute_batch("SAVEPOINT remem_embedding_reindex_batch")
         .context("start memory embedding reindex savepoint")?;
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<usize> {
         let upsert_start = Instant::now();
-        {
-            let mut stmt = conn.prepare(super::UPSERT_EMBEDDING_SQL)?;
-            for embedding in prepared {
-                super::execute_embedding_upsert(
-                    &mut stmt,
-                    embedding.memory_id,
-                    &embedding.model,
-                    &embedding.content_hash,
-                    &embedding.values,
-                    embedding.updated_at_epoch,
-                )
-                .with_context(|| {
-                    format!(
-                        "memory embedding upsert failed for memory id={}",
-                        embedding.memory_id
-                    )
-                })?;
-            }
-        }
+        let mut processed = 0;
         let mut by_profile: std::collections::BTreeMap<(&str, usize), Vec<i64>> =
             std::collections::BTreeMap::new();
-        for embedding in prepared {
-            by_profile
-                .entry((embedding.model.as_str(), embedding.values.len()))
-                .or_default()
-                .push(embedding.memory_id);
+        {
+            let mut stmt = conn.prepare(UPSERT_CURRENT_EMBEDDING_SQL)?;
+            for embedding in prepared {
+                let written = execute_prepared_embedding_upsert(&mut stmt, embedding)
+                    .with_context(|| {
+                        format!(
+                            "memory embedding upsert failed for memory id={}",
+                            embedding.source.id
+                        )
+                    })?;
+                if written {
+                    processed += 1;
+                    by_profile
+                        .entry((embedding.model.as_str(), embedding.values.len()))
+                        .or_default()
+                        .push(embedding.source.id);
+                }
+            }
         }
         for ((model, dimensions), memory_ids) in by_profile {
             super::vec_index::sync_vec_upsert_batch(
@@ -421,16 +408,16 @@ fn upsert_prepared_memory_embedding_batch(
             )?;
         }
         crate::perf::push_elapsed(timings, "upsert_embeddings", upsert_start);
-        Ok(())
+        Ok(processed)
     })();
 
     match result {
-        Ok(()) => {
+        Ok(processed) => {
             let commit_start = Instant::now();
             conn.execute_batch("RELEASE SAVEPOINT remem_embedding_reindex_batch")
                 .context("release memory embedding reindex savepoint")?;
             crate::perf::push_elapsed(timings, "commit", commit_start);
-            Ok(prepared_count)
+            Ok(processed)
         }
         Err(error) => {
             let rollback_result = conn.execute_batch(
@@ -460,9 +447,18 @@ mod profile_batch_tests {
         conn.execute("INSERT INTO memories(id,project,title,content,memory_type,status,created_at_epoch,updated_at_epoch)
             VALUES(1,'/repo','fixture','evidence','decision','active',1,1)", [])?;
         let prepared = |model: &str, values: Vec<f32>| PreparedMemoryEmbedding {
-            memory_id: 1,
+            source: super::super::reindex::MemoryEmbeddingReindexCandidate {
+                id: 1,
+                topic_key: None,
+                title: "fixture".to_string(),
+                content: "evidence".to_string(),
+                memory_type: "decision".to_string(),
+                search_context: String::new(),
+            },
             model: model.to_string(),
-            content_hash: "fixture".to_string(),
+            content_hash: crate::retrieval::embedding::memory_index_hash(
+                "fixture", "evidence", "decision", None, "",
+            ),
             values,
             updated_at_epoch: 1,
         };
