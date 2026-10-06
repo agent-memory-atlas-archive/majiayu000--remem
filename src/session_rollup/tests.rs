@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use crate::db::{record_captured_event, CaptureEventInput, ExtractionTaskKind};
 
 use super::*;
+use task_fixture::claim_rollup_task;
 
 mod bounded_input;
 mod citation_evidence;
@@ -15,6 +16,7 @@ mod session_labels;
 mod side_effects;
 mod summary_current;
 mod summary_evidence;
+mod task_fixture;
 
 fn setup_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("in-memory db should open");
@@ -40,11 +42,6 @@ fn capture(conn: &Connection, session_id: &str, event_type: &str, content: &str)
     outcome
         .extraction_task_id
         .ok_or_else(|| anyhow::anyhow!("expected extraction task id"))
-}
-
-fn claim_rollup_task(conn: &mut Connection) -> Result<db::ExtractionTask> {
-    db::claim_next_extraction_task(conn, "worker-a", 60)?
-        .ok_or_else(|| anyhow::anyhow!("expected rollup task"))
 }
 
 fn summary_count(conn: &Connection) -> i64 {
