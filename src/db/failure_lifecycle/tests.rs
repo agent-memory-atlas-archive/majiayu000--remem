@@ -41,8 +41,6 @@ fn classifier_treats_sqlite_schema_locks_as_transient() {
         FailureClass::Transient
     );
 }
-
-
 fn setup_conn() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
