@@ -117,7 +117,7 @@ fn later_parent_chunk_does_not_skip_a_failed_followups_original_prefix() -> Resu
         )?,
         child_id
     );
-    let member = validated_replay_member(&conn, child_id, range)?;
+    let member = super::replay_member::validated_replay_member(&conn, child_id, range)?;
     assert_eq!(
         (member.from, member.to, member.completed),
         (events[0], events[3], None)

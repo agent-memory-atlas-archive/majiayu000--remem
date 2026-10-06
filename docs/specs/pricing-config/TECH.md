@@ -137,6 +137,11 @@ stages the replacement Rust declaration fingerprints and records the exact
 superseded published identities. This is a source compatibility change awaiting
 release review, not a promotion of the published `v0.6.82` baseline.
 
+Migration v096 is a forward database change. Older binaries reject a database
+whose recorded schema is newer than they support. A rollback therefore uses a
+compatible binary or the matching pre-upgrade backup; deleting migration markers
+does not make the newer schema compatible.
+
 ## Verification
 
 Use synthetic JSON, in-memory SQLite, and harmless local fake subprocesses.
