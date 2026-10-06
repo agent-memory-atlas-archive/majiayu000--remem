@@ -22,11 +22,13 @@ pub(super) struct MonthRow {
     pub observations: i64,
     pub sessions: i64,
     pub ai_cost: f64,
+    pub ai_usage_coverage: crate::db::AiUsageCoverage,
 }
 
 #[derive(Debug, Serialize)]
 pub(super) struct TokenEcon {
     pub total_ai_cost: f64,
+    pub ai_usage_coverage: crate::db::AiUsageCoverage,
     pub total_discovery_tokens: i64,
     pub sessions_with_context: i64,
 }

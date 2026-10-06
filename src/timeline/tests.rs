@@ -79,6 +79,34 @@ fn empty_project_produces_report() {
 }
 
 #[test]
+fn usage_timeline_reports_known_portion_and_coverage_with_matching_project() -> anyhow::Result<()> {
+    let conn = Connection::open_in_memory()?;
+    crate::migrate::run_migrations(&conn)?;
+    for (project, pricing, cost_status, cost) in [
+        ("/wanted", "remem_static", "complete", 0.123),
+        ("/wanted", "unknown_pricing", "unpriced", 0.0),
+        ("/other", "unknown_pricing", "unpriced", 0.0),
+    ] {
+        conn.execute("INSERT INTO ai_usage_events(created_at,created_at_epoch,project,operation,executor,input_tokens,output_tokens,total_tokens,estimated_cost_usd,usage_source,pricing_source,usage_status,attempt_outcome,cost_status)
+            VALUES('fixture',1767571200,?1,'fixture','codex-cli',100,40,140,?2,'codex_log',?3,'complete','success',?4)", params![project,cost,pricing,cost_status])?;
+    }
+    let json = serde_json::to_value(generate_timeline_report_data(&conn, "/wanted", true)?)?;
+    assert_eq!(json["token_economics"]["total_ai_cost"], 0.123);
+    assert_eq!(
+        json["token_economics"]["ai_usage_coverage"]["unpriced_calls"],
+        1
+    );
+    assert_eq!(
+        json["monthly_breakdown"][0]["ai_usage_coverage"]["cost_incomplete_calls"],
+        1
+    );
+    let text = generate_timeline_report(&conn, "/wanted", true)?;
+    assert!(text.contains("Known AI cost estimate: $0.12"));
+    assert!(text.contains("1 incomplete calls, including 1 unpriced"));
+    Ok(())
+}
+
+#[test]
 fn summary_report_excludes_timeline() {
     let conn = Connection::open_in_memory().unwrap();
     setup_test_db(&conn);
