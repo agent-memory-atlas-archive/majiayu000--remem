@@ -29,15 +29,15 @@ fn ensure_state_table(conn: &Connection) -> Result<()> {
 }
 
 pub(super) fn vec_table_name(profile: EmbeddingProfile<'_>) -> String {
+    format!("memory_embedding_vec_v2_{}", vec_table_key(profile))
+}
+
+fn vec_table_key(profile: EmbeddingProfile<'_>) -> String {
     let mut digest = Sha256::new();
     digest.update((profile.model.len() as u64).to_le_bytes());
     digest.update(profile.model.as_bytes());
     digest.update((profile.dimensions as u64).to_le_bytes());
-    format!(
-        "memory_embedding_vec_v2_{}_{:x}",
-        profile.dimensions,
-        digest.finalize()
-    )
+    format!("{}_{:x}", profile.dimensions, digest.finalize())
 }
 
 fn vec_table_exists(conn: &Connection, profile: EmbeddingProfile<'_>) -> Result<bool> {
@@ -129,9 +129,10 @@ fn ensure_vec_index_profile(conn: &Connection, profile: EmbeddingProfile<'_>) ->
     )?;
     let batch = crate::db::query::collect_rows(rows)?;
     let table = vec_table_name(profile);
+    let key = vec_table_key(profile);
     let mut delete = conn.prepare(&format!("DELETE FROM {table} WHERE memory_id = ?1"))?;
     let mut insert = conn.prepare(&format!(
-        "INSERT INTO {table} (memory_id, embedding) VALUES (?1, ?2)"
+        "INSERT INTO memory_embedding_vec_v2_{key} (memory_id, embedding) VALUES (?1, ?2)"
     ))?;
     let mut advanced = cursor;
     for (memory_id, embedding) in &batch {
@@ -201,9 +202,10 @@ pub(crate) fn sync_vec_upsert_batch(
         [&ids_json],
     )
     .context("clear vector profile mirror batch")?;
+    let key = vec_table_key(profile);
     conn.execute(
         &format!(
-            "INSERT INTO {table} (memory_id, embedding)
+            "INSERT INTO memory_embedding_vec_v2_{key} (memory_id, embedding)
              SELECT memory_id, embedding FROM memory_embeddings
              WHERE model = ?1 AND dimensions = ?2
                AND memory_id IN (SELECT value FROM json_each(?3))"
