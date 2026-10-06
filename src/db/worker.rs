@@ -30,6 +30,15 @@ pub fn upsert_worker_heartbeat(
     Ok(())
 }
 
+/// Retain diagnostic timestamps while retiring only this worker instance.
+pub(crate) fn retire_worker_heartbeat(conn: &Connection, owner: &str, pid: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE worker_heartbeats SET pid = NULL WHERE owner = ?1 AND pid = ?2",
+        params![owner, i64::from(pid)],
+    )?;
+    Ok(())
+}
+
 pub fn current_worker_owner(mode: &str, pid: u32, epoch_millis: i64) -> String {
     format!("{CURRENT_WORKER_OWNER_PREFIX}{mode}-{pid}-{epoch_millis}")
 }
@@ -184,9 +193,27 @@ fn heartbeat_process_alive(pid: Option<i64>) -> bool {
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        true
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        // A terminated process is signaled even if its exit code was 259.
+        // Zero timeout never waits, and SYNCHRONIZE grants no mutation rights.
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid as u32) };
+        if process.is_null() {
+            return false;
+        }
+        let state = unsafe { WaitForSingleObject(process, 0) };
+        unsafe { CloseHandle(process) };
+        state == WAIT_TIMEOUT
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
     }
 }
 
@@ -288,6 +315,35 @@ mod tests {
         let healthy = healthy_worker_heartbeat(&conn, WORKER_HEARTBEAT_HEALTH_SECS)
             .expect("healthy heartbeat query should run");
         assert!(healthy.is_none());
+    }
+
+    #[test]
+    fn retired_heartbeat_preserves_history_and_other_worker_instances() -> anyhow::Result<()> {
+        let conn = Connection::open_in_memory()?;
+        setup(&conn);
+        let now = chrono::Utc::now().timestamp();
+        let pid = std::process::id();
+        upsert_worker_heartbeat(&conn, "retired", i64::from(pid), now - 2, now)?;
+        upsert_worker_heartbeat(&conn, "other", i64::from(pid), now - 1, now)?;
+        super::retire_worker_heartbeat(&conn, "retired", pid.saturating_add(1))?;
+        assert!(conn.query_row(
+            "SELECT pid IS NOT NULL FROM worker_heartbeats WHERE owner = 'retired'",
+            [],
+            |row| row.get::<_, bool>(0)
+        )?);
+        super::retire_worker_heartbeat(&conn, "retired", pid)?;
+        let retired: (Option<i64>, i64, i64) = conn.query_row(
+            "SELECT pid, started_at_epoch, updated_at_epoch FROM worker_heartbeats WHERE owner = 'retired'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(retired, (None, now - 2, now));
+        assert_eq!(
+            healthy_worker_heartbeat(&conn, WORKER_HEARTBEAT_HEALTH_SECS)?
+                .unwrap()
+                .owner,
+            "other"
+        );
+        Ok(())
     }
 
     #[test]

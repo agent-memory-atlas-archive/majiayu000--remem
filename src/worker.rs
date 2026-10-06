@@ -5,6 +5,7 @@ use crate::db;
 
 mod admission;
 mod cleanup;
+mod heartbeat;
 mod job;
 mod legacy_pending;
 mod lock;
@@ -282,6 +283,7 @@ pub async fn run_exact_replay(
     );
     let mut conn = db::open_db()?;
     record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
+    let _heartbeat = heartbeat::Registration::new(&lease_owner);
     let task = db::retry_and_claim_extraction_replay_range(
         &mut conn,
         range_id,
@@ -330,6 +332,8 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         let conn = db::open_db()?;
         record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
     }
+
+    let _heartbeat = heartbeat::Registration::new(&lease_owner);
 
     let mut legacy_pending_migration_schedule = legacy_pending::new_schedule(once, Instant::now());
     let mut retrieval_enrichment_schedule =
@@ -569,10 +573,6 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         continue;
     }
 
-    if !once {
-        let conn = db::open_db()?;
-        record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
-    }
     crate::log::info("worker", "stopped");
     Ok(())
 }
