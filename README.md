@@ -66,6 +66,12 @@ cargo install remem-ai --bin remem
 remem install --target codex
 ```
 
+Codex installation, detection, doctor, uninstall, transcript scanning and
+default native-memory import all honor `CODEX_HOME`; the default is
+`~/.codex`. Set it to an absolute directory before running these commands
+to select another Codex profile. Empty or relative overrides fail visibly
+before installation writes. Unrelated profile files stay untouched.
+
 GitHub Releases: prebuilt binaries for macOS and Linux on x64/arm64, with
 published checksums. Use one canonical `remem` executable on `PATH`;
 `remem doctor` warns when hooks and terminals resolve different copies.

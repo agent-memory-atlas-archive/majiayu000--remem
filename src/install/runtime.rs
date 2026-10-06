@@ -22,7 +22,7 @@ pub(in crate::install) struct RuntimeStoreReady {
 
 pub fn install(target: InstallTarget, dry_run: bool, hooks_only: bool, repair: bool) -> Result<()> {
     let bin = binary_path()?;
-    let hosts = resolve_hosts(target);
+    let hosts = resolve_hosts(target)?;
     // Explicit Cursor selection on a platform without an approved renderer
     // fails closed before any host write (B-001).
     if matches!(target, InstallTarget::Cursor | InstallTarget::All)
@@ -496,7 +496,7 @@ pub fn uninstall(target: InstallTarget, dry_run: bool) -> Result<()> {
     } else {
         target
     };
-    let hosts = resolve_hosts(effective);
+    let hosts = resolve_hosts(effective)?;
     // Uninstall touches Cursor only when it is explicitly selected or (via
     // Auto -> All) the platform has an approved renderer and Cursor is
     // detected; an unsupported platform must not fail unrelated cleanup.

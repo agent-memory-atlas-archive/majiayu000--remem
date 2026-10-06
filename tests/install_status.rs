@@ -30,6 +30,7 @@ fn status_works_after_recommended_install_path() {
         .env("USERPROFILE", &home)
         .env("REMEM_DATA_DIR", &data_dir)
         .env("REMEM_INSTALL_BINARY", remem_bin)
+        .env_remove("CODEX_HOME")
         .env_remove("REMEM_ALLOW_PLAINTEXT_DB")
         .env_remove("REMEM_CIPHER_KEY")
         .output()
@@ -87,6 +88,7 @@ fn fresh_install_keeps_migration_info_out_of_normal_terminal_output() {
         .env("USERPROFILE", &home)
         .env("REMEM_DATA_DIR", &data_dir)
         .env("REMEM_INSTALL_BINARY", remem_bin)
+        .env_remove("CODEX_HOME")
         .env_remove("REMEM_ALLOW_PLAINTEXT_DB")
         .env_remove("REMEM_CIPHER_KEY")
         .env_remove("REMEM_DEBUG")
@@ -132,6 +134,7 @@ fn fresh_install_debug_keeps_migration_info_on_stderr() {
         .env("USERPROFILE", &home)
         .env("REMEM_DATA_DIR", &data_dir)
         .env("REMEM_INSTALL_BINARY", remem_bin)
+        .env_remove("CODEX_HOME")
         .env("REMEM_DEBUG", "1")
         .env_remove("REMEM_ALLOW_PLAINTEXT_DB")
         .env_remove("REMEM_CIPHER_KEY")
@@ -151,4 +154,159 @@ fn fresh_install_debug_keeps_migration_info_on_stderr() {
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn isolated_codex_command(root: &std::path::Path, codex_home: &std::ffi::OsStr) -> Command {
+    let remem_bin = env!("CARGO_BIN_EXE_remem");
+    let mut command = Command::new(remem_bin);
+    command
+        .env("HOME", root.join("home"))
+        .env("USERPROFILE", root.join("home"))
+        .env("CODEX_HOME", codex_home)
+        .env("REMEM_DATA_DIR", root.join("data"))
+        .env("REMEM_INSTALL_BINARY", remem_bin)
+        .env_remove("REMEM_ALLOW_PLAINTEXT_DB")
+        .env_remove("REMEM_CIPHER_KEY")
+        .env_remove("REMEM_DEBUG")
+        .env_remove("REMEM_STDERR_TO_LOG");
+    command
+}
+
+#[test]
+fn codex_selected_profile_is_shared_by_install_doctor_and_uninstall() {
+    let root = install_status_temp_root();
+    let default_root = root.join("home/.codex");
+    let selected = root.join("profiles/selected");
+    std::fs::create_dir_all(&default_root).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    let default_config = "# default profile must remain byte-identical\nmodel = 'default-model'\n";
+    let default_hooks = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"default-profile-hook"}]}]}}"#;
+    std::fs::write(default_root.join("config.toml"), default_config).unwrap();
+    std::fs::write(default_root.join("hooks.json"), default_hooks).unwrap();
+    std::fs::write(
+        selected.join("config.toml"),
+        "model = 'selected-model'\n[mcp_servers.other]\ncommand = 'other-command'\n",
+    )
+    .unwrap();
+    std::fs::write(selected.join("hooks.json"), r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"selected-profile-hook"}]}]}}"#).unwrap();
+
+    let dry_run = isolated_codex_command(&root, selected.as_os_str())
+        .args(["install", "--target", "codex", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(dry_run.status.success(), "{dry_run:?}");
+    let plan = String::from_utf8_lossy(&dry_run.stderr);
+    assert!(
+        plan.contains(selected.join("config.toml").to_string_lossy().as_ref()),
+        "{plan}"
+    );
+    assert!(
+        plan.contains(selected.join("hooks.json").to_string_lossy().as_ref()),
+        "{plan}"
+    );
+    assert!(
+        !root.join("data").exists(),
+        "dry-run must not initialize the store"
+    );
+
+    let install = isolated_codex_command(&root, selected.as_os_str())
+        .args(["install", "--target", "auto"])
+        .output()
+        .unwrap();
+    assert!(install.status.success(), "{install:?}");
+    let config = std::fs::read_to_string(selected.join("config.toml")).unwrap();
+    let hooks = std::fs::read_to_string(selected.join("hooks.json")).unwrap();
+    assert!(
+        config.contains("mcp_servers.remem") && config.contains("selected-model"),
+        "{config}"
+    );
+    assert!(
+        hooks.contains("selected-profile-hook") && hooks.contains("UserPromptSubmit"),
+        "{hooks}"
+    );
+
+    let doctor = isolated_codex_command(&root, selected.as_os_str())
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
+    let checks = report["checks"].as_array().unwrap();
+    for name in ["Hooks (codex)", "MCP (codex)"] {
+        let check = checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .expect("Codex check");
+        assert_eq!(check["status"], "ok", "{check}");
+        assert!(
+            check["detail"]
+                .as_str()
+                .unwrap()
+                .contains(selected.to_string_lossy().as_ref()),
+            "{check}"
+        );
+    }
+
+    let uninstall = isolated_codex_command(&root, selected.as_os_str())
+        .args(["uninstall", "--target", "codex"])
+        .output()
+        .unwrap();
+    assert!(uninstall.status.success(), "{uninstall:?}");
+    let config = std::fs::read_to_string(selected.join("config.toml")).unwrap();
+    let hooks = std::fs::read_to_string(selected.join("hooks.json")).unwrap();
+    assert!(
+        !config.contains("mcp_servers.remem") && config.contains("other-command"),
+        "{config}"
+    );
+    assert!(
+        hooks.contains("selected-profile-hook") && !hooks.contains("remem context"),
+        "{hooks}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(default_root.join("config.toml")).unwrap(),
+        default_config
+    );
+    assert_eq!(
+        std::fs::read_to_string(default_root.join("hooks.json")).unwrap(),
+        default_hooks
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn invalid_codex_home_fails_before_install_or_uninstall_writes() {
+    let root = install_status_temp_root();
+    let default_root = root.join("home/.codex");
+    std::fs::create_dir_all(&default_root).unwrap();
+    let original = "[mcp_servers.remem]\ncommand = 'remem'\n";
+    std::fs::write(default_root.join("config.toml"), original).unwrap();
+    let file_root = root.join("file-not-directory");
+    std::fs::write(&file_root, "sentinel").unwrap();
+    for invalid in [
+        std::ffi::OsStr::new(""),
+        std::ffi::OsStr::new("relative-profile"),
+        file_root.as_os_str(),
+    ] {
+        for command in ["install", "uninstall"] {
+            let output = isolated_codex_command(&root, invalid)
+                .args([command, "--target", "codex"])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{command} accepted {invalid:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .to_lowercase()
+                    .contains("codex"),
+                "{output:?}"
+            );
+            assert!(
+                !root.join("data").exists(),
+                "invalid selection must not initialize the store"
+            );
+            assert_eq!(
+                std::fs::read_to_string(default_root.join("config.toml")).unwrap(),
+                original
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }

@@ -24,7 +24,7 @@ pub(in crate::cli) fn run_import_codex_memories(
     dry_run: bool,
     expect_plan_digest: Option<&str>,
 ) -> Result<()> {
-    let source_dir = resolve_source_dir(source);
+    let source_dir = resolve_source_dir(source)?;
 
     let discovery = match discover_source(&source_dir)? {
         SourceDiscovery::NotConfigured => {
@@ -76,9 +76,9 @@ pub(in crate::cli) fn run_import_codex_memories(
     Ok(())
 }
 
-fn resolve_source_dir(source: Option<&Path>) -> PathBuf {
+fn resolve_source_dir(source: Option<&Path>) -> Result<PathBuf> {
     match source {
-        Some(path) => path.to_path_buf(),
+        Some(path) => Ok(path.to_path_buf()),
         None => crate::install::codex_memories_dir(),
     }
 }

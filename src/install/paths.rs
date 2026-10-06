@@ -32,20 +32,6 @@ pub(in crate::install) fn old_hooks_path() -> PathBuf {
         .join("hooks.json")
 }
 
-pub(in crate::install) fn codex_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex")
-        .join("config.toml")
-}
-
-pub(in crate::install) fn codex_hooks_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex")
-        .join("hooks.json")
-}
-
 pub(in crate::install) fn cursor_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -65,12 +51,10 @@ pub(in crate::install) fn cursor_mcp_path() -> PathBuf {
 
 /// Official Codex CLI user-level rollout-summary memory location, verified on
 /// codex-cli 0.145.0 (docs/research/gh852-host-native-memory-poc.md).
-pub(crate) fn codex_memories_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".codex")
+pub(crate) fn codex_memories_dir() -> Result<PathBuf> {
+    Ok(crate::host_roots::codex()?
         .join("memories")
-        .join("rollout_summaries")
+        .join("rollout_summaries"))
 }
 
 /// Filename fingerprint of codex-rollout-summary/v1, verified against a real

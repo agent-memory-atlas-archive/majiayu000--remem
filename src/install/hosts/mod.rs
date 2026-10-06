@@ -18,17 +18,20 @@ use crate::install::host::{InstallHost, InstallTarget};
 /// - `Cursor`: no trait-driven hosts.
 /// - `Auto`: only hosts whose config dir exists.
 /// - `All`: every known trait-driven host.
-pub(in crate::install) fn resolve_hosts(target: InstallTarget) -> Vec<Box<dyn InstallHost>> {
-    match target {
+pub(in crate::install) fn resolve_hosts(
+    target: InstallTarget,
+) -> anyhow::Result<Vec<Box<dyn InstallHost>>> {
+    Ok(match target {
         InstallTarget::Claude => vec![Box::new(ClaudeHost)],
-        InstallTarget::Codex => vec![Box::new(CodexHost)],
+        InstallTarget::Codex => vec![Box::new(CodexHost::from_env()?)],
         InstallTarget::Cursor => Vec::new(),
-        InstallTarget::All => vec![Box::new(ClaudeHost), Box::new(CodexHost)],
+        InstallTarget::All => vec![Box::new(ClaudeHost), Box::new(CodexHost::from_env()?)],
         InstallTarget::Auto => {
-            let all: Vec<Box<dyn InstallHost>> = vec![Box::new(ClaudeHost), Box::new(CodexHost)];
+            let all: Vec<Box<dyn InstallHost>> =
+                vec![Box::new(ClaudeHost), Box::new(CodexHost::from_env()?)];
             all.into_iter().filter(|h| h.is_available()).collect()
         }
-    }
+    })
 }
 
 /// Whether the Cursor host is part of the selection for `target` (B-001):

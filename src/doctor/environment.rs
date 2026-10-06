@@ -16,7 +16,17 @@ pub(super) fn check_binary() -> Check {
 }
 
 pub(super) fn check_install_paths() -> Check {
-    let mut configured = configured_remem_paths_for(active_hosts());
+    let hosts = match active_hosts() {
+        Ok(hosts) => hosts,
+        Err(error) => {
+            return Check::new(
+                "Install paths",
+                Status::Fail,
+                format!("invalid Codex home: {error}"),
+            )
+        }
+    };
+    let mut configured = configured_remem_paths_for(hosts);
     if configured.is_empty() {
         configured.extend(
             std::env::var_os("REMEM_INSTALL_BINARY")
@@ -56,9 +66,10 @@ struct HostProbe {
     mcp_paths: Vec<PathBuf>,
 }
 
-fn known_hosts() -> Vec<HostProbe> {
+fn known_hosts() -> anyhow::Result<Vec<HostProbe>> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    vec![
+    let codex_home = crate::host_roots::codex()?;
+    Ok(vec![
         HostProbe {
             name: "claude",
             hooks_path: home.join(".claude").join("settings.json"),
@@ -69,10 +80,10 @@ fn known_hosts() -> Vec<HostProbe> {
         },
         HostProbe {
             name: "codex",
-            hooks_path: home.join(".codex").join("hooks.json"),
-            mcp_paths: vec![home.join(".codex").join("config.toml")],
+            hooks_path: codex_home.join("hooks.json"),
+            mcp_paths: vec![codex_home.join("config.toml")],
         },
-    ]
+    ])
 }
 
 /// True if the host's config directory exists — i.e. the tool is installed
@@ -83,15 +94,22 @@ fn host_present(probe: &HostProbe) -> bool {
         || probe.mcp_paths.iter().any(|path| path.exists())
 }
 
-fn active_hosts() -> Vec<HostProbe> {
-    known_hosts().into_iter().filter(host_present).collect()
+fn active_hosts() -> anyhow::Result<Vec<HostProbe>> {
+    Ok(known_hosts()?.into_iter().filter(host_present).collect())
 }
 
 /// Produce one Check per detected host's hooks file. Hosts whose config
 /// directory doesn't exist are silently skipped — they aren't installed, so
 /// there's nothing to validate.
 pub(super) fn check_hooks() -> Vec<Check> {
-    check_hooks_for(active_hosts())
+    match active_hosts() {
+        Ok(hosts) => check_hooks_for(hosts),
+        Err(error) => vec![Check::new(
+            "Hooks (codex)",
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        )],
+    }
 }
 
 fn check_hooks_for(hosts: Vec<HostProbe>) -> Vec<Check> {
@@ -110,7 +128,14 @@ fn check_hooks_for(hosts: Vec<HostProbe>) -> Vec<Check> {
 }
 
 pub(super) fn check_mcp() -> Vec<Check> {
-    check_mcp_for(active_hosts())
+    match active_hosts() {
+        Ok(hosts) => check_mcp_for(hosts),
+        Err(error) => vec![Check::new(
+                "MCP (codex)",
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        )],
+    }
 }
 
 fn check_mcp_for(hosts: Vec<HostProbe>) -> Vec<Check> {
