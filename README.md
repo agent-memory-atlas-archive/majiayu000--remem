@@ -192,6 +192,10 @@ Raw evidence remains available when per-event prompt content is clipped. Exact
 recovery retains the original range and resumes verified successful chunks
 under the explicitly selected profile and one overall timeout.
 
+Workers persist fair queue and stage/project claim order, so continuing capture
+in a busy project leaves room for downstream extraction and durable jobs across
+once-worker restarts. The existing once-worker admission budget still applies.
+
 Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
 dropped or routed to review with a diagnosable reason.

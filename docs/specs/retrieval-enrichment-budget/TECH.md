@@ -58,6 +58,13 @@ enrichment lane remains rate-limited independently.
 The schedule remains after current extraction tasks and durable jobs, and
 before embedding backfill. Automatic capture remains unchanged.
 
+Current extraction and ordinary durable jobs use the persisted v095 dispatch
+order in `failure-lifecycle/TECH.md`. Their queue turns and stage/host/project
+service history survive once-worker restarts. The worker rechecks the same
+four-item / 180-second budget before either selected or fallback lane; empty
+lanes do not consume admission or fairness history. Cleanup keeps its separate
+early lane, and enrichment remains idle-only (Refs #1105).
+
 ## Diagnostics
 
 Retrieval-enrichment coverage records `ready`, `pending`, `exhausted`, and

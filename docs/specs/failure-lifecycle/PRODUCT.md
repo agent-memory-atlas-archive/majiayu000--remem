@@ -102,6 +102,24 @@ return, task error, and cancellation/unwind deactivate only that worker's own
 heartbeat while preserving its last diagnostic time. An unexpected process
 kill continues to use OS liveness and the existing expired-lease recovery.
 
+### Fair worker progress (Refs #1105)
+
+Ready extraction and durable-job queues take turns according to persisted claim
+history. Within each queue, ready stage/host/project groups that have waited
+longest for service run first. Priority and age decide equally served groups,
+preserving low-latency first dispatch. Continuing capture in one project cannot
+keep later extraction stages or other projects from receiving work; restarting
+a once worker does not reset fairness. A group without eligible work consumes no
+turn, including a future retry or a rule-compilation successor blocked by its
+active predecessor.
+
+The once-worker four-item / 180-second admission budget, early local cleanup,
+idle-only historical drain and retrieval enrichment, exact-replay isolation,
+and per-task retry/timeout rules remain in force. Fairness orders claims, not
+wall-clock runtimes; a task already inside a provider call keeps its existing
+timeout. Failure diagnostics identify an actual scheduled retry, an exhausted
+chunk with later evidence pending, or terminal failure from persisted state.
+
 ## User-Visible Behavior
 
 - `remem status` / `remem doctor` split failure reporting into

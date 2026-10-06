@@ -298,6 +298,38 @@ as exhausted to avoid a retry storm; v069 creates new conflict evidence and
 must preserve each source row's actual attempt count. Neither rule changes the
 retention, cleanup, or aggregate-history policy below.
 
+### 2.3 Persisted stage and project dispatch (Refs #1105)
+
+v095 creates `worker_dispatch_state`, an operational scheduling table keyed by
+queue or by queue/stage/host/project. It contains a frozen first-ready sequence
+and a nullable last-claim sequence, without source payloads or model state. Before
+ordinary claim selection, an IMMEDIATE transaction registers all currently
+eligible groups at the current global claim sequence. Selection orders by
+`COALESCE(last_claim_sequence, ready_sequence)`, then never-claimed first, then
+existing priority/creation/id tie-breaks. Recording first readiness prevents a
+stream of new groups from resetting waiting order. Capture/coalescing never
+refreshes service history. A successful claim atomically increments the sequence
+and records both its queue and stage/host/project group; rollback or an empty
+claim cannot consume a turn.
+
+The worker uses the same persisted sequence to select the extraction or ordinary
+job lane and falls back if the selected lane became empty. Shared eligibility
+SQL excludes future retries, cleanup from the ordinary job lane, and blocked
+CompileRules successors. Groups not currently ready never enter candidate order.
+Cleanup retains its separate early lane; idle-only work and the four-item /
+180-second once admission remain unchanged. Explicit exact replay bypasses fair
+selection and does not alter ordinary service history. Within a stage/project
+group, task priority/age remains the existing policy; this change does not claim
+fair per-session CPU time or preempt a running provider call.
+
+v095 is schema-only, starts with an empty scheduler ledger, and preserves all
+business task/job rows. Older binaries may ignore this additive table but cannot
+provide the new fairness guarantee; all active workers must use the new binary.
+Rollback follows the v094 backup/forward-fix rule. Pure SQLite fixtures cover a
+continuously coalescing high-priority source, older downstream work and another
+project, sustained new-group arrival, queue alternation across reopen, excluded
+groups, exact isolation, and rollback of claim plus dispatch metadata together.
+
 ### 3. Retention / archiving
 
 A worker maintenance step transitions eligible rows to archived
