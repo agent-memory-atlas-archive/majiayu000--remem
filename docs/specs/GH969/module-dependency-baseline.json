@@ -478,18 +478,6 @@
     },
     {
       "source": "db",
-      "target": "ai",
-      "sites": [
-        {
-          "path": "src/db/usage.rs",
-          "kind": "use",
-          "signature": "usecrate::ai::TokenUsage;",
-          "occurrence": 1
-        }
-      ]
-    },
-    {
-      "source": "db",
       "target": "memory",
       "sites": [
         {

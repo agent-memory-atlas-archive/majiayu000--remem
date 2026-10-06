@@ -396,6 +396,13 @@ Use the [current configuration routes](docs/README.md#configuration), the
 [local embedding contract](docs/specs/local-semantic-embedding/PRODUCT.md), and
 `remem config`, `remem embedding`, or `remem reranker` help for details.
 
+`remem usage` reports every dispatched memory-AI attempt, including failures.
+Observed zero, partial, missing, invalid, and text-estimated token counts remain
+distinct. Reported USD is the known priced portion; coverage counts show when
+unknown rates or missing counter details make it incomplete. Failed attempts
+without provider counters do not receive guessed token estimates. Historical
+usage remains labeled as unverified rather than being silently reclassified.
+
 ### Share or edit memory outside the database
 
 <!-- remem-doc-contract:current-project-export:start -->
