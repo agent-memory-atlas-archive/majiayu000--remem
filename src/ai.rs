@@ -8,6 +8,9 @@ mod pricing;
 mod tests;
 mod types;
 mod usage;
+mod usage_observation;
+#[cfg(test)]
+mod usage_tests;
 
 use cli::call_cli;
 use codex_cli::call_codex_cli;
@@ -21,6 +24,7 @@ tokio::task_local! {
 
 pub(crate) use types::TokenUsage;
 pub use types::UsageContext;
+pub(crate) use usage_observation::{UsageObservation, UsageStatus};
 
 /// AI call with timeout. Executor/model/path are resolved from remem config.
 pub async fn call_ai(
@@ -47,12 +51,54 @@ pub async fn call_ai(
         crate::runtime_config::MemoryAiExecutor::CodexCli => {
             call_codex_cli(system, user_message, &profile).await
         }
-    }?;
+    };
 
     let input_tokens = estimate_tokens(system) + estimate_tokens(user_message);
-    let output_tokens = estimate_tokens(&result.text);
-    record_usage(ctx, &result, input_tokens, output_tokens);
-    Ok(result.text)
+    match result {
+        Ok(result) => {
+            let output_tokens = estimate_tokens(&result.text);
+            record_usage(ctx, &result, "success", input_tokens, output_tokens);
+            Ok(result.text)
+        }
+        Err(error) => {
+            let fallback;
+            let evidence = if let Some(failure) = error.downcast_ref::<types::AiCallFailure>() {
+                &failure.evidence
+            } else {
+                let (executor, model, source) = match profile.executor {
+                    crate::runtime_config::MemoryAiExecutor::Http => (
+                        "http",
+                        config::resolve_model_for_api(profile.model.as_deref().unwrap_or("haiku"))
+                            .to_string(),
+                        Some("anthropic_usage"),
+                    ),
+                    crate::runtime_config::MemoryAiExecutor::CodexCli => (
+                        "codex-cli",
+                        profile
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| "codex-default".into()),
+                        Some("codex_log"),
+                    ),
+                    crate::runtime_config::MemoryAiExecutor::ClaudeCli => (
+                        "cli",
+                        profile.model.clone().unwrap_or_else(|| "haiku".into()),
+                        None,
+                    ),
+                };
+                fallback = types::AiCallResult {
+                    text: String::new(),
+                    executor,
+                    model,
+                    usage: None,
+                    usage_source: source,
+                };
+                &fallback
+            };
+            record_usage(ctx, evidence, "failed", 0, 0);
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn with_resolved_profile<T>(

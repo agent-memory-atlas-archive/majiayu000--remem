@@ -475,6 +475,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "extraction_completed_progress",
         sql: include_str!("../migrations/v094_extraction_completed_progress.sql"),
     },
+    Migration {
+        version: 96,
+        name: "ai_usage_observation",
+        sql: include_str!("../migrations/v096_ai_usage_observation.sql"),
+    },
 ];
 
 pub(crate) const OLD_BASELINE_VERSION: i64 = 13;

@@ -4,13 +4,28 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tokio::process::Command;
 
-use crate::ai::types::{AiCallResult, AI_TIMEOUT_SECS};
+use crate::ai::types::{AiCallFailure, AiCallResult, AI_TIMEOUT_SECS};
 use crate::runtime_config::ResolvedMemoryAiProfile;
 
 pub(super) async fn call_codex_cli(
     system: &str,
     user_message: &str,
     profile: &ResolvedMemoryAiProfile,
+) -> Result<AiCallResult> {
+    call_codex_cli_with_timeout(
+        system,
+        user_message,
+        profile,
+        std::time::Duration::from_secs(AI_TIMEOUT_SECS),
+    )
+    .await
+}
+
+pub(super) async fn call_codex_cli_with_timeout(
+    system: &str,
+    user_message: &str,
+    profile: &ResolvedMemoryAiProfile,
+    timeout: std::time::Duration,
 ) -> Result<AiCallResult> {
     let codex = profile.cli_path.as_deref().unwrap_or("codex");
     let model = profile.model.clone();
@@ -46,40 +61,35 @@ pub(super) async fn call_codex_cli(
         stdin.write_all(prompt.as_bytes()).await?;
     }
 
-    let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(AI_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            let _ = std::fs::remove_file(&output_path);
-            return Err(error.into());
-        }
+    // The buffers outlive the cancellable wait, preserving terminal events
+    // already read when the process times out or a pipe fails.
+    use tokio::io::AsyncReadExt;
+    let mut stdout = child.stdout.take().context("Codex stdout pipe missing")?;
+    let mut stderr = child.stderr.take().context("Codex stderr pipe missing")?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let exit = tokio::time::timeout(timeout, async {
+        let (_, _, status) = tokio::try_join!(
+            stdout.read_to_end(&mut stdout_bytes),
+            stderr.read_to_end(&mut stderr_bytes),
+            child.wait(),
+        )?;
+        Ok::<_, std::io::Error>(status)
+    })
+    .await;
+    let exit = match exit {
+        Ok(result) => result.map_err(anyhow::Error::from),
         Err(_) => {
-            let _ = std::fs::remove_file(&output_path);
-            anyhow::bail!("codex CLI timed out after {}s", AI_TIMEOUT_SECS);
+            let _ = child.start_kill();
+            Err(anyhow::anyhow!(
+                "codex CLI timed out after {}s",
+                timeout.as_secs_f64()
+            ))
         }
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let _ = std::fs::remove_file(&output_path);
-        anyhow::bail!("codex CLI exited {}: {}", output.status, stderr);
-    }
-
-    let text = std::fs::read_to_string(&output_path)
-        .with_context(|| format!("failed to read Codex output {}", output_path.display()))?
-        .trim()
-        .to_string();
-    let _ = std::fs::remove_file(&output_path);
-    if text.is_empty() {
-        anyhow::bail!("codex CLI returned empty response");
-    }
-
     let codex_usage =
-        match super::codex_usage::parse_codex_json_events(&output.stdout, model.clone()) {
+        match super::codex_usage::parse_codex_json_events(&stdout_bytes, model.clone()) {
             Ok(usage) => usage,
             Err(error) => {
                 crate::log::warn("ai", &format!("codex usage parse failed: {}", error));
@@ -94,15 +104,44 @@ pub(super) async fn call_codex_cli(
         .map(|run_usage| run_usage.usage.clone());
     let usage_model = codex_usage.and_then(|run_usage| run_usage.model);
 
-    Ok(AiCallResult {
-        text,
+    let evidence = AiCallResult {
+        text: String::new(),
         executor: "codex-cli",
         model: usage_model
             .or(model)
             .unwrap_or_else(|| "codex-default".to_string()),
         usage,
         usage_source: Some("codex_log"),
-    })
+    };
+    let text = match exit {
+        Ok(status) if status.success() => std::fs::read_to_string(&output_path)
+            .with_context(|| format!("failed to read Codex output {}", output_path.display())),
+        Ok(status) => Err(anyhow::anyhow!(
+            "codex CLI exited {}: {}",
+            status,
+            String::from_utf8_lossy(&stderr_bytes)
+        )),
+        Err(error) => Err(error),
+    };
+    let _ = std::fs::remove_file(&output_path);
+    finish_output(evidence, text)
+}
+
+fn finish_output(mut evidence: AiCallResult, text: Result<String>) -> Result<AiCallResult> {
+    let text = text.and_then(|text| {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            anyhow::bail!("codex CLI returned empty response");
+        }
+        Ok(text)
+    });
+    match text {
+        Ok(text) => {
+            evidence.text = text;
+            Ok(evidence)
+        }
+        Err(error) => Err(AiCallFailure::with_evidence(error, evidence)),
+    }
 }
 
 fn build_codex_args(

@@ -177,6 +177,7 @@ fn apply_family_env(default: ModelPricing, prefix: &str) -> ModelPricing {
     }
 }
 
+#[cfg(test)]
 pub(super) fn estimate_cost_usd(
     model: &str,
     usage: &crate::ai::TokenUsage,
@@ -191,4 +192,189 @@ pub(super) fn estimate_cost_usd(
         + (usage.cache_creation_tokens as f64 / 1_000_000.0) * pricing.cache_creation_per_mtok
         + (usage.cache_read_tokens as f64 / 1_000_000.0) * pricing.cache_read_per_mtok;
     Ok((cost, pricing.source))
+}
+
+/// Price the known portion independently from counter completeness. A raw
+/// total can resolve an absent split only when every possible rate agrees.
+pub(super) fn estimate_observed_cost_usd(
+    model: &str,
+    observation: &super::UsageObservation,
+) -> Result<(f64, &'static str, &'static str)> {
+    let Some(pricing) = pricing_breakdown_for_model(model)? else {
+        return Ok((0.0, "unknown_pricing", "unpriced"));
+    };
+    price_observation(pricing, observation)
+}
+
+fn price_observation(
+    pricing: ModelPricing,
+    observation: &super::UsageObservation,
+) -> Result<(f64, &'static str, &'static str)> {
+    for rate in [
+        pricing.input_per_mtok,
+        pricing.output_per_mtok,
+        pricing.reasoning_per_mtok,
+        pricing.cache_creation_per_mtok,
+        pricing.cache_read_per_mtok,
+    ] {
+        anyhow::ensure!(
+            rate.is_finite() && rate >= 0.0,
+            "invalid usage pricing rate"
+        );
+    }
+    if !observation.parts.is_empty() {
+        let mut cost = 0.0;
+        let mut complete = observation.status != super::UsageStatus::Invalid;
+        for part in &observation.parts {
+            let (portion, _, status) = price_observation(pricing, part)?;
+            cost += portion;
+            complete &= status == "complete";
+        }
+        anyhow::ensure!(cost.is_finite(), "invalid usage cost calculation");
+        return Ok((
+            cost,
+            pricing.source,
+            if complete { "complete" } else { "partial" },
+        ));
+    }
+    if matches!(
+        observation.status,
+        super::UsageStatus::Missing | super::UsageStatus::Invalid
+    ) {
+        return Ok((0.0, pricing.source, "partial"));
+    }
+    let tokens = &observation.tokens;
+    let (input, input_complete) = price_group(
+        observation,
+        "raw_input_tokens",
+        tokens.raw_input_tokens,
+        &[
+            ("input_tokens", tokens.input_tokens, pricing.input_per_mtok),
+            (
+                "cache_creation_tokens",
+                tokens.cache_creation_tokens,
+                pricing.cache_creation_per_mtok,
+            ),
+            (
+                "cache_read_tokens",
+                tokens.cache_read_tokens,
+                pricing.cache_read_per_mtok,
+            ),
+        ],
+    )?;
+    let (output, output_complete) = price_group(
+        observation,
+        "raw_output_tokens",
+        tokens.raw_output_tokens,
+        &[
+            (
+                "output_tokens",
+                tokens.output_tokens,
+                pricing.output_per_mtok,
+            ),
+            (
+                "reasoning_tokens",
+                tokens.reasoning_tokens,
+                pricing.reasoning_per_mtok,
+            ),
+        ],
+    )?;
+    let cost = input + output;
+    anyhow::ensure!(
+        cost.is_finite() && cost >= 0.0,
+        "invalid usage cost calculation"
+    );
+    Ok((
+        cost,
+        pricing.source,
+        if input_complete && output_complete {
+            "complete"
+        } else {
+            "partial"
+        },
+    ))
+}
+
+fn price_group(
+    observation: &super::UsageObservation,
+    raw_field: &str,
+    raw_tokens: i64,
+    categories: &[(&str, i64, f64)],
+) -> Result<(f64, bool)> {
+    let mut cost = 0.0;
+    let mut classified: i64 = 0;
+    let mut unknown_rates = Vec::new();
+    for (field, tokens, rate) in categories {
+        // Partial multi-turn observations can retain a known category portion
+        // even when that category was absent from another turn.
+        classified = classified
+            .checked_add(*tokens)
+            .ok_or_else(|| anyhow::anyhow!("usage category total overflow"))?;
+        cost += (*tokens as f64 / 1_000_000.0) * rate;
+        if !observation.field_known(field) {
+            unknown_rates.push(*rate);
+        }
+    }
+    if !observation.field_known(raw_field) {
+        return Ok((cost, false));
+    }
+    anyhow::ensure!(raw_tokens >= classified, "usage subtotal exceeds raw total");
+    let remainder = raw_tokens - classified;
+    if remainder == 0 {
+        return Ok((cost, true));
+    }
+    if let Some(rate) = unknown_rates
+        .first()
+        .filter(|first| unknown_rates.iter().all(|rate| rate == *first))
+    {
+        cost += (remainder as f64 / 1_000_000.0) * rate;
+        return Ok((cost, true));
+    }
+    Ok((cost, false))
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::ai::codex_usage::parse_codex_json_events;
+
+    #[test]
+    fn usage_cost_missing_reasoning_split_requires_equal_category_rates() {
+        let usage = parse_codex_json_events(br#"{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":1000000}}"#, None).unwrap().unwrap().usage;
+        assert_eq!(usage.status, crate::ai::UsageStatus::Partial);
+        let pricing = ModelPricing::openai(2.0, 8.0, 0.2);
+        assert_eq!(
+            price_observation(pricing, &usage).unwrap(),
+            (10.0, "remem_static", "complete")
+        );
+        let different = ModelPricing {
+            reasoning_per_mtok: 12.0,
+            ..pricing
+        };
+        assert_eq!(
+            price_observation(different, &usage).unwrap(),
+            (2.0, "remem_static", "partial")
+        );
+    }
+
+    #[test]
+    fn usage_cost_never_turns_missing_or_invalid_counts_into_complete_zero() {
+        let pricing = ModelPricing::openai(2.0, 8.0, 0.2);
+        assert_eq!(
+            price_observation(pricing, &crate::ai::UsageObservation::missing()).unwrap(),
+            (0.0, "remem_static", "partial")
+        );
+        let invalid = parse_codex_json_events(br#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":200,"output_tokens":0,"reasoning_output_tokens":0}}"#, None).unwrap().unwrap().usage;
+        assert_eq!(
+            price_observation(pricing, &invalid).unwrap(),
+            (0.0, "remem_static", "partial")
+        );
+        let mut invalid_pricing = pricing;
+        invalid_pricing.output_per_mtok = f64::INFINITY;
+        assert!(price_observation(
+            invalid_pricing,
+            &crate::ai::UsageObservation::estimated(1, 1)
+        )
+        .is_err());
+    }
 }
