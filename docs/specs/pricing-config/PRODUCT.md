@@ -51,6 +51,7 @@ not erase usage already received from that attempt. The original failure
 still reaches the caller; a retry is another attempt, not a duplicate to
 deduplicate. A failed attempt with no counters records missing usage and
 does not estimate paid tokens from prompt length.
+Cancellation by an outer timeout also preserves counters already received.
 
 Provider/log usage distinguishes complete, partial, missing, and invalid
 counters. An explicitly reported zero remains an observation. Missing or
@@ -59,12 +60,16 @@ subtotals, and arithmetic overflow are invalid. Valid counters from an
 incomplete event remain available, including raw totals and cache/reasoning
 breakdowns. The successful Claude text-only adapter retains its separately
 labeled prompt/output length estimate.
+Contradictory subtotals remain available for diagnosis but cannot inflate a
+valid reported gross token total.
 
 Cost coverage is independent from counter completeness. For example, Codex
 may report raw output without a reasoning split. Equal output/reasoning
 rates can price that raw total; different configured rates cannot. Only
 the priceable portion contributes to the existing USD field. Unknown or
 invalid pricing preserves the usage row and reports unavailable pricing.
+The automatic Codex model placeholder is unpriced unless an operator sets
+an explicit global override; it does not identify the model Codex selected.
 
 Usage summaries, daily/weekly and source groups, API stats, latest-session
 status, and timeline reports present the known priced portion alongside

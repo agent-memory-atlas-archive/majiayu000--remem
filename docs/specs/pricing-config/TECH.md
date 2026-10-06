@@ -61,6 +61,9 @@ cache/reasoning splits remain unknown: no clamping or fabricated observed
 zero is permitted. Contradictory cache aliases or a subtotal exceeding its
 raw total is invalid. Multiple `turn.completed` observations aggregate with
 checked arithmetic and retain incomplete/invalid status across turns.
+Known gross input/output totals prefer valid raw counters over contradictory
+subtotals. When raw totals are missing, only safe known category portions
+contribute; invalid raw totals do not manufacture a replacement gross count.
 
 Codex parses available stdout usage before exit/final-output validation.
 HTTP parses usage before response-text validation, including JSON error
@@ -70,6 +73,17 @@ propagating the original error. Failures without available counters have
 missing usage; only successful text-only Claude output uses a text estimate.
 Process timeout or transport failure without received terminal telemetry
 cannot supply unobserved provider counters.
+A dispatch-scoped attempt guard survives cancellation of the backend future.
+Codex updates its shared observation after each complete stdout event; guard
+drop records a failed attempt with that evidence, or missing counters. Normal
+success/error handling disarms the guard before recording, so completion and
+drop do not create duplicate rows. Prompt writes, stdout/stderr drains, and
+process wait all share the Codex deadline. Accounting remains a synchronous
+best-effort database write with an explicit error log on persistence failure.
+
+`codex-default` is an unknown-model placeholder. The global override paths
+run first; absent such an override, it returns `unknown_pricing` before the
+generic named Codex/GPT model-family lookup. Named model rates are unchanged.
 
 ## Persistence and aggregates
 
