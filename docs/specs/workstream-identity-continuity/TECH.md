@@ -146,8 +146,8 @@ Change `upsert_workstream` to use this order:
    - join through `workstreams` for project, owner, status, and merged-row
      filters instead of trusting copied alias ownership fields;
    - active/paused canonical rows only;
-   - if multiple candidates exist, do not auto-merge; log an ambiguity warning
-     and continue to the next safe path.
+   - if multiple candidates exist, log an ambiguity warning and stop automatic
+     matching; keep the incoming work in a separate workstream.
 4. Current exact title match.
 5. Conservative fuzzy fallback:
    - use a separate automatic matcher with normalized word-boundary
