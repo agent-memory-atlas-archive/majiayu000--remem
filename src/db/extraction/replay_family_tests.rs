@@ -4,6 +4,7 @@ use rusqlite::{params, Connection};
 use super::*;
 use crate::db::{self, CaptureEventInput};
 
+mod bounded;
 mod exact;
 
 fn fixture() -> Result<(Connection, i64, Vec<i64>)> {

@@ -8,6 +8,7 @@ mod lifecycle;
 mod loaders;
 mod progress;
 mod replay_member;
+mod retry_admission;
 
 pub use enqueue::*;
 pub(crate) use exact_family::{
@@ -24,6 +25,7 @@ pub(crate) use progress::{checkpoint_claimed_extraction_task_chunk, replay_resum
 pub(crate) use replay_member::{
     restore_replay_family_members, validated_replay_member, validated_replay_members,
 };
+pub(crate) use retry_admission::{replay_retry_family_predicate, validate_replay_family_admission};
 
 pub const EXTRACTION_TASK_MAX_ATTEMPTS: i64 = 5;
 

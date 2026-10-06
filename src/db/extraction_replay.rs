@@ -125,28 +125,21 @@ pub fn count_retryable_extraction_replay_ranges(
     project: Option<&str>,
     limit: i64,
 ) -> Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*)
-         FROM (
-             SELECT r.id
-             FROM extraction_replay_ranges r
-             JOIN projects p ON p.id = r.project_id
-             WHERE r.status IN ('pending', 'failed')
-               AND r.archived_at_epoch IS NULL
-               AND NOT EXISTS (
-                 SELECT 1
-                 FROM extraction_tasks t
-                 WHERE t.replay_range_id = r.id
-                   AND t.status IN ('pending', 'processing')
-               )
-               AND (?1 IS NULL OR p.project_path = ?1)
-             ORDER BY r.updated_at_epoch ASC, r.id ASC
-             LIMIT ?2
-         )",
-        params![project, limit.max(1)],
-        |row| row.get(0),
+    Ok(
+        query_retryable_replay_range_ids(conn, project, None, false, false, limit, true)?.len()
+            as i64,
     )
-    .map_err(Into::into)
+}
+
+pub(crate) fn count_quarantinable_extraction_replay_ranges(
+    conn: &Connection,
+    project: Option<&str>,
+    limit: i64,
+) -> Result<i64> {
+    Ok(
+        query_retryable_replay_range_ids(conn, project, None, false, false, limit, false)?.len()
+            as i64,
+    )
 }
 
 fn query_retryable_replay_range_ids(
@@ -156,25 +149,28 @@ fn query_retryable_replay_range_ids(
     acknowledge_quarantine: bool,
     include_archived: bool,
     limit: i64,
+    include_blocked_graph: bool,
 ) -> Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
+    let family_predicate = if include_blocked_graph {
+        crate::db::replay_retry_family_predicate()
+    } else {
+        "NOT EXISTS (SELECT 1 FROM extraction_tasks t WHERE t.replay_range_id = r.id
+          AND t.status IN ('pending', 'processing'))"
+            .to_owned()
+    };
+    let mut stmt = conn.prepare(&format!(
         "SELECT r.id
          FROM extraction_replay_ranges r
          JOIN projects p ON p.id = r.project_id
          WHERE (r.status IN ('pending', 'failed')
                 OR (?3 = 1 AND r.status = 'quarantined'))
            AND (?4 = 1 OR r.archived_at_epoch IS NULL)
-           AND NOT EXISTS (
-             SELECT 1
-             FROM extraction_tasks t
-             WHERE t.replay_range_id = r.id
-               AND t.status IN ('pending', 'processing')
-           )
+           AND ({family_predicate})
            AND (?1 IS NULL OR p.project_path = ?1)
            AND (?2 IS NULL OR r.id = ?2)
          ORDER BY r.updated_at_epoch ASC, r.id ASC
-         LIMIT ?5",
-    )?;
+         LIMIT ?5"
+    ))?;
     let rows = stmt.query_map(
         params![
             project,
@@ -185,7 +181,13 @@ fn query_retryable_replay_range_ids(
         ],
         |row| row.get::<_, i64>(0),
     )?;
-    crate::db::query::collect_rows(rows)
+    let ids = crate::db::query::collect_rows(rows)?;
+    if include_blocked_graph {
+        for id in &ids {
+            crate::db::validate_replay_family_admission(conn, *id)?;
+        }
+    }
+    Ok(ids)
 }
 
 pub fn ensure_extraction_replay_range_retryable(
@@ -202,10 +204,24 @@ pub fn ensure_extraction_replay_range_retryable(
         acknowledge_quarantine,
         include_archived,
         1,
+        true,
     )?;
     ensure!(
         range_ids == [range_id],
         "extraction replay range {range_id} is not retryable"
+    );
+    Ok(())
+}
+
+pub(crate) fn ensure_extraction_replay_range_quarantinable(
+    conn: &Connection,
+    range_id: i64,
+) -> Result<()> {
+    ensure!(range_id > 0, "extraction replay range id must be positive");
+    let ids = query_retryable_replay_range_ids(conn, None, Some(range_id), false, false, 1, false)?;
+    ensure!(
+        ids == [range_id],
+        "extraction replay range {range_id} is not quiescent for quarantine"
     );
     Ok(())
 }
@@ -281,7 +297,7 @@ pub(crate) fn retry_and_claim_extraction_replay_range(
 
 pub fn quarantine_extraction_replay_range(conn: &Connection, range_id: i64) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
-    ensure_extraction_replay_range_retryable(&tx, range_id, false, false)?;
+    ensure_extraction_replay_range_quarantinable(&tx, range_id)?;
     let now = chrono::Utc::now().timestamp();
     tx.execute(
         "UPDATE extraction_replay_ranges
@@ -299,8 +315,9 @@ pub fn retry_extraction_replay_ranges(
     project: Option<&str>,
     limit: i64,
 ) -> Result<usize> {
-    let tx = conn.unchecked_transaction()?;
-    let range_ids = query_retryable_replay_range_ids(&tx, project, None, false, false, limit)?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    let range_ids =
+        query_retryable_replay_range_ids(&tx, project, None, false, false, limit, true)?;
     for range_id in &range_ids {
         enqueue_replay_extraction_task(&tx, *range_id, false)?;
     }
@@ -314,7 +331,8 @@ pub fn quarantine_extraction_replay_ranges(
     limit: i64,
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let range_ids = query_retryable_replay_range_ids(&tx, project, None, false, false, limit)?;
+    let range_ids =
+        query_retryable_replay_range_ids(&tx, project, None, false, false, limit, false)?;
     let now = chrono::Utc::now().timestamp();
     for range_id in &range_ids {
         tx.execute(

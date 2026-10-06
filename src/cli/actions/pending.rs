@@ -325,10 +325,10 @@ pub(in crate::cli) fn run_pending(action: PendingAction) -> Result<()> {
             if dry_run {
                 let conn = db::open_db_read_only()?;
                 if let Some(range_id) = id {
-                    db::ensure_extraction_replay_range_retryable(&conn, range_id, false, false)?;
+                    db::ensure_extraction_replay_range_quarantinable(&conn, range_id)?;
                     println!("Would quarantine exhausted extraction range {range_id}.");
                 } else {
-                    let count = db::count_retryable_extraction_replay_ranges(
+                    let count = db::count_quarantinable_extraction_replay_ranges(
                         &conn,
                         project.as_deref(),
                         limit,

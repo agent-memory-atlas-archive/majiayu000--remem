@@ -56,28 +56,25 @@ pub(super) fn retry_due_extraction_replay_ranges(
     now_epoch: i64,
 ) -> Result<usize> {
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.attempts
+        &format!("SELECT r.id, r.attempts
          FROM extraction_replay_ranges r
          WHERE r.status IN ('pending', 'failed')
            AND r.archived_at_epoch IS NULL
            AND COALESCE(r.failure_class, 'transient') = 'transient'
            AND r.attempts < ?1
            AND COALESCE(r.failed_at_epoch, r.updated_at_epoch, r.created_at_epoch) + (?2 * (1 << r.attempts)) <= ?3
-           AND NOT EXISTS (
-             SELECT 1 FROM extraction_tasks t
-             WHERE t.replay_range_id = r.id
-               AND t.status IN ('pending', 'processing')
-           )
+           AND ({})
          ORDER BY COALESCE(r.failed_at_epoch, r.updated_at_epoch, r.created_at_epoch) ASC, r.id ASC
-         LIMIT 25",
+         LIMIT 25", crate::db::replay_retry_family_predicate()),
     )?;
     let rows = stmt.query_map(
         params![MAX_FAILURE_AUTO_RETRIES, FAILURE_RETRY_BASE_SECS, now_epoch],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )?;
+    let candidates = crate::db::query::collect_rows(rows)?;
+    drop(stmt);
     let mut count = 0;
-    for row in rows {
-        let (range_id, attempts) = row?;
+    for (range_id, attempts) in candidates {
         crate::log::info(
             "failure_lifecycle",
             &format!(

@@ -40,7 +40,7 @@ pub fn enqueue_followup_extraction_task(
         )
     };
     let cursor_event_id = source.replay_range_id.and(source.cursor_event_id);
-    let (replay_from, resume_cursor) = replay_followup_bounds(
+    let (replay_from, resume_cursor, replay_range_id) = replay_followup_bounds(
         conn,
         source,
         &idempotency_key,
@@ -108,7 +108,7 @@ pub fn enqueue_followup_extraction_task(
             cursor_event_id,
             high_watermark_event_id,
             now,
-            source.replay_range_id,
+            replay_range_id,
             replay_from,
             resume_cursor
         ],
@@ -118,7 +118,7 @@ pub fn enqueue_followup_extraction_task(
         params![idempotency_key],
         |row| row.get(0),
     )?;
-    if let Some(range_id) = source.replay_range_id {
+    if let Some(range_id) = replay_range_id {
         super::replay_member::validated_replay_member(conn, id, range_id)?;
     }
     Ok(id)
@@ -174,7 +174,7 @@ pub fn enqueue_bounded_followup_extraction_task(
             high_watermark_event_id
         )
     };
-    let (replay_from, resume_cursor) = replay_followup_bounds(
+    let (replay_from, resume_cursor, replay_range_id) = replay_followup_bounds(
         conn,
         source,
         &idempotency_key,
@@ -247,7 +247,7 @@ pub fn enqueue_bounded_followup_extraction_task(
             cursor_event_id,
             high_watermark_event_id,
             now,
-            source.replay_range_id,
+            replay_range_id,
             replay_from,
             resume_cursor
         ],
@@ -263,9 +263,10 @@ pub fn enqueue_bounded_followup_extraction_task(
         task_kind,
         cursor_event_id,
         high_watermark_event_id,
+        resume_cursor.unwrap_or(cursor_event_id),
         now,
     )?;
-    if let Some(range_id) = source.replay_range_id {
+    if let Some(range_id) = replay_range_id {
         super::replay_member::validated_replay_member(conn, task_id, range_id)?;
     }
     Ok(task_id)
@@ -277,36 +278,92 @@ fn replay_followup_bounds(
     key: &str,
     cursor: Option<i64>,
     high: i64,
-) -> Result<(Option<i64>, Option<i64>)> {
-    let Some(range_id) = source.replay_range_id else {
-        return Ok((None, cursor));
+) -> Result<(Option<i64>, Option<i64>, Option<i64>)> {
+    let existing: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT id, replay_range_id FROM extraction_tasks WHERE idempotency_key = ?1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some(range_id) = source
+        .replay_range_id
+        .or(existing.and_then(|(_, range)| range))
+    else {
+        if let Some((id, None)) = existing {
+            let archived_range: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM extraction_replay_ranges r
+                   JOIN extraction_tasks t ON t.id = r.source_task_id
+                 WHERE r.source_task_id = ?1 AND r.task_kind = t.task_kind
+                   AND r.from_event_id = ?2 AND r.to_event_id = ?3
+                   AND (r.archived_at_epoch IS NOT NULL OR r.status = 'quarantined'
+                        OR t.archived_at_epoch IS NOT NULL))",
+                params![id, cursor.unwrap_or(0) + 1, high],
+                |r| r.get(0),
+            )?;
+            ensure!(!archived_range, "bounded follow-up task {id} has an archived or quarantined replay range; use explicit exact recovery");
+        }
+        return Ok((None, cursor, None));
     };
-    let parent = super::replay_member::validated_replay_member(conn, source.id, range_id)?;
+    let mutable: bool = conn.query_row(
+        "SELECT r.archived_at_epoch IS NULL
+           AND (r.status IN ('pending', 'failed', 'requeued')
+                OR (?3 AND r.status = 'replayed' AND EXISTS (
+                    SELECT 1 FROM extraction_tasks t WHERE t.id = ?2 AND t.status = 'done')))
+           AND NOT EXISTS (SELECT 1 FROM extraction_tasks t WHERE t.id = ?2 AND t.archived_at_epoch IS NOT NULL)
+         FROM extraction_replay_ranges r WHERE r.id = ?1",
+        params![range_id, existing.map(|(id, _)| id), source.replay_range_id.is_none()],
+        |r| r.get(0),
+    )?;
+    ensure!(mutable, "replay follow-up range {range_id} is archived, quarantined or closed; use explicit exact recovery");
     let from = cursor
         .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("replay follow-up start overflow"))?;
-    ensure!(
-        from >= parent.from && from <= high && high <= parent.to,
-        "replay follow-up exceeds its parent evidence range"
-    );
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM extraction_tasks WHERE idempotency_key = ?1",
-            [key],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(id) = existing {
+    if source.replay_range_id.is_some() {
+        let parent = super::replay_member::validated_replay_member(conn, source.id, range_id)?;
+        ensure!(
+            from >= parent.from && from <= high && high <= parent.to,
+            "replay follow-up exceeds its parent evidence range"
+        );
+    }
+    if let Some((id, existing_range)) = existing {
+        ensure!(
+            existing_range == Some(range_id),
+            "replay follow-up {id} range identity changed"
+        );
         let member = super::replay_member::validated_replay_member(conn, id, range_id)?;
+        let scoped: bool = conn.query_row(
+            "SELECT host_id = ?2 AND workspace_id = ?3 AND project_id = ?4 AND session_row_id IS ?5
+             FROM extraction_tasks WHERE id = ?1",
+            params![
+                id,
+                source.host_id,
+                source.workspace_id,
+                source.project_id,
+                source.session_row_id
+            ],
+            |r| r.get(0),
+        )?;
+        ensure!(scoped, "replay follow-up {id} producer scope changed");
+        if source.replay_range_id.is_none() {
+            ensure!(
+                member.from == from && member.to == high,
+                "ordinary producer cannot widen replay follow-up task {id}"
+            );
+        }
         ensure!(
             !matches!(member.status.as_str(), "done" | "failed")
                 || (member.lease_owner.is_none() && member.lease_expires_epoch.is_none()),
             "terminal replay follow-up {id} still has another owner"
         );
-        Ok((Some(member.from), Some(member.resume_cursor())))
+        Ok((
+            Some(member.from),
+            Some(member.resume_cursor()),
+            Some(range_id),
+        ))
     } else {
-        Ok((Some(from), cursor))
+        Ok((Some(from), cursor, Some(range_id)))
     }
 }
 
@@ -316,6 +373,7 @@ fn link_matching_replay_range_for_bounded_retry(
     task_kind: ExtractionTaskKind,
     cursor_event_id: i64,
     high_watermark_event_id: i64,
+    resume_cursor: i64,
     now: i64,
 ) -> Result<()> {
     let range_id = conn
@@ -327,6 +385,7 @@ fn link_matching_replay_range_for_bounded_retry(
                AND from_event_id = ?3
                AND to_event_id = ?4
                AND status IN ('pending', 'failed', 'requeued')
+               AND archived_at_epoch IS NULL
              ORDER BY id DESC
              LIMIT 1",
             params![
@@ -341,6 +400,16 @@ fn link_matching_replay_range_for_bounded_retry(
     let Some(range_id) = range_id else {
         return Ok(());
     };
+    let already_handed_off: bool = conn.query_row(
+        "SELECT replay_range_id IS ?2 AND status IN ('processing', 'done')
+         FROM extraction_tasks WHERE id = ?1",
+        params![task_id, range_id],
+        |r| r.get(0),
+    )?;
+    if already_handed_off {
+        super::replay_member::validated_replay_member(conn, task_id, range_id)?;
+        return Ok(());
+    }
     let linked = conn.execute(
         "UPDATE extraction_tasks
          SET replay_range_id = ?1,
@@ -348,14 +417,15 @@ fn link_matching_replay_range_for_bounded_retry(
              updated_at_epoch = ?2
          WHERE id = ?3
            AND status = 'pending'
-           AND cursor_event_id = ?4
+           AND cursor_event_id = ?6
            AND high_watermark_event_id = ?5",
         params![
             range_id,
             now,
             task_id,
             cursor_event_id,
-            high_watermark_event_id
+            high_watermark_event_id,
+            resume_cursor
         ],
     )?;
     if linked != 1 {
@@ -371,5 +441,6 @@ fn link_matching_replay_range_for_bounded_retry(
            AND status IN ('pending', 'failed')",
         params![task_id, now, range_id],
     )?;
+    super::replay_member::validated_replay_member(conn, task_id, range_id)?;
     Ok(())
 }

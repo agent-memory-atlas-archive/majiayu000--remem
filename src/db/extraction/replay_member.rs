@@ -48,8 +48,19 @@ pub(crate) fn validated_replay_member(
     task_id: i64,
     range_id: i64,
 ) -> Result<ReplayMemberProgress> {
-    let (key, prefix, stored_from, cursor, mut member, range_from, canonical, source, scope_valid) =
-        conn.query_row(
+    let (
+        key,
+        prefix,
+        stored_from,
+        cursor,
+        mut member,
+        range_from,
+        canonical,
+        source,
+        scope_valid,
+        kind,
+    ) = conn
+        .query_row(
             "SELECT t.idempotency_key,
                 t.host_id || ':' || t.project_id || ':' || t.session_row_id || ':' || t.task_kind,
                 t.replay_from_event_id, t.cursor_event_id, t.high_watermark_event_id,
@@ -62,7 +73,8 @@ pub(crate) fn validated_replay_member(
                   AND t.session_row_id IS NOT NULL
                   AND t.high_watermark_event_id BETWEEN r.from_event_id AND r.to_event_id
                   AND (r.replay_task_id IS NOT t.id OR
-                       (r.task_kind = t.task_kind AND t.high_watermark_event_id = r.to_event_id))
+                       (r.task_kind = t.task_kind AND t.high_watermark_event_id = r.to_event_id)),
+                t.task_kind
              FROM extraction_tasks t JOIN extraction_replay_ranges r ON r.id = ?2
              WHERE t.id = ?1 AND t.replay_range_id = r.id",
             params![task_id, range_id],
@@ -86,6 +98,7 @@ pub(crate) fn validated_replay_member(
                     row.get::<_, bool>(11)?,
                     row.get::<_, bool>(12)?,
                     row.get::<_, bool>(13)?,
+                    row.get::<_, String>(14)?,
                 ))
             },
         )
@@ -94,6 +107,7 @@ pub(crate) fn validated_replay_member(
         scope_valid,
         "replay member {task_id} scope or target mismatch"
     );
+    crate::db::ExtractionTaskKind::from_db(&kind)?;
 
     let bounded_from = bounded_key_start(&key, &prefix, range_id, member.to, source)?;
     let known_followup = key == format!("{prefix}:replay:{range_id}")
@@ -183,18 +197,22 @@ pub(crate) fn restore_replay_family_members(conn: &Connection, range_id: i64) ->
         !conn.is_autocommit(),
         "replay family recovery requires a transaction"
     );
-    let members = validated_replay_members(conn, range_id)?;
-    for member in &members {
-        ensure!(
-            matches!(member.status.as_str(), "done" | "failed")
-                && member.lease_owner.is_none()
-                && member.lease_expires_epoch.is_none(),
-            "replay member {} is active or owned by another attempt",
-            member.id
-        );
-    }
+    let members = super::retry_admission::validate_replay_family_admission(conn, range_id)?;
     let now = chrono::Utc::now().timestamp();
     for member in members {
+        if member.status == "pending" {
+            // Waiting does not spend attempts. Preserve its schedule when
+            // restoring the failed prerequisite, and retain its own evidence.
+            let updated = conn.execute(
+                "UPDATE extraction_tasks SET cursor_event_id = ?1,
+                     replay_from_event_id = COALESCE(replay_from_event_id, ?2), updated_at_epoch = ?3
+                 WHERE id = ?4 AND replay_range_id = ?5 AND status = 'pending'
+                   AND lease_owner IS NULL AND lease_expires_epoch IS NULL",
+                params![member.resume_cursor(), member.from, now, member.id, range_id],
+            )?;
+            super::loaders::ensure_task_updated(updated, member.id)?;
+            continue;
+        }
         conn.execute(
             "UPDATE extraction_tasks SET status = ?1, cursor_event_id = ?2,
                  replay_from_event_id = COALESCE(replay_from_event_id, ?3),
