@@ -187,6 +187,12 @@ fn knn_prefilters_scope_before_foreign_neighbors_consume_k() -> Result<()> {
             &format!("UPDATE memories SET {field}=?1 WHERE id BETWEEN 2 AND 513"),
             [value],
         )?;
+        // Canonical field changes invalidate embeddings through memories_au.
+        // Restore real near-neighbor competition for every scope predicate.
+        for id in 2..=513 {
+            put(&conn, id, "A", &[0.9, (1.0_f32 - 0.9_f32.powi(2)).sqrt()])?;
+        }
+        assert_eq!(embedding_count(&conn)?, 514, "{field}");
         let outcome = vector_search_embedding_filtered(
             &conn,
             &vector,
@@ -205,6 +211,10 @@ fn knn_prefilters_scope_before_foreign_neighbors_consume_k() -> Result<()> {
         );
     }
     conn.execute("UPDATE memories SET branch=NULL, memory_type='decision', status='active', title='scope-fixture-suppressed' WHERE id BETWEEN 2 AND 513", [])?;
+    for id in 2..=513 {
+        put(&conn, id, "A", &[0.9, (1.0_f32 - 0.9_f32.powi(2)).sqrt()])?;
+    }
+    assert_eq!(embedding_count(&conn)?, 514, "suppression");
     conn.execute("INSERT INTO memory_suppressions(target_kind,target_value,reason,actor,status,created_at_epoch,updated_at_epoch)
         VALUES('pattern','scope-fixture-suppressed','fixture','test','active',1,1)", [])?;
     let filters = VectorSearchFilters {
