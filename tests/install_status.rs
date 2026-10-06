@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[path = "support/cli_startup.rs"]
+mod cli_startup;
+
 fn install_status_temp_root() -> std::path::PathBuf {
     let counter = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(

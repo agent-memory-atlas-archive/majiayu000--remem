@@ -14,6 +14,7 @@ from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
 
+from surface_lifecycle_cli_tests import grouped_cli_self_test
 from surface_lifecycle_discovery import (
     ROW_DETAILS,
     ROW_STATUS,
@@ -756,7 +757,7 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
-        return lifecycle_self_test()
+        return grouped_cli_self_test() or lifecycle_self_test()
     for path in ROOT_REQUIRED_FILES:
         require_file(path)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

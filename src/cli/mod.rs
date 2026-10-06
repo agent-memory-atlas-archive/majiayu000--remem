@@ -11,6 +11,7 @@ mod embedding_types;
 mod eval_types;
 mod memory_types;
 mod model_types;
+mod pending_types;
 mod procedure_types;
 mod project_types;
 mod query_types;
@@ -29,6 +30,8 @@ mod tests_eval;
 mod tests_governance;
 #[cfg(test)]
 mod tests_maintenance;
+#[cfg(test)]
+mod tests_parser_compat;
 #[cfg(test)]
 mod tests_procedures;
 #[cfg(test)]
