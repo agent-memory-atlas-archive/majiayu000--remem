@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Staged source version `0.6.103` closes audited memory-pipeline gaps: governed summary admission and evidence-versioned pending candidates; profile-isolated, scope-prefiltered vector recall; bounded extraction and verified replay progress; durable fair dispatch; complete AI-attempt evidence and cost-coverage reporting; conservative workstream identity; selected Codex profile consistency; and worker liveness/retirement. Refs #1102, #1103, #1104, #1105.
 - Staged source version `0.6.102` reports permanent and retry-exhausted background job failures at error level without promising an automatic retry.
 - Staged source version `0.6.101` binds session-intent preview and apply to the eligible summary shown by session listings, leaving hidden quarantined summaries unchanged.
 - Staged source version `0.6.100` redacts embedded credentials in raw session, REST session/workstream, and activity labels after rendering, preserving valid topics when redaction expands their length.
