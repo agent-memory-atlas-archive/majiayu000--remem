@@ -1,6 +1,13 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
+mod dispatch;
+pub(crate) use dispatch::{
+    preferred_worker_queue, record_extraction_dispatch, record_job_dispatch,
+    register_ready_dispatch_groups, WorkerQueue, READY_EXTRACTION_DISPATCH_SQL,
+    READY_JOB_DISPATCH_SQL,
+};
+
 pub const WORKER_HEARTBEAT_HEALTH_SECS: i64 = 480;
 const CURRENT_WORKER_OWNER_PREFIX: &str = concat!("worker-v", env!("CARGO_PKG_VERSION"), "-");
 

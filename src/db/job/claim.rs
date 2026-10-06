@@ -10,26 +10,16 @@ pub fn claim_next_job(
 ) -> Result<Option<Job>> {
     let now = chrono::Utc::now().timestamp();
     let lease_expires = now + lease_secs.max(1);
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    crate::db::register_ready_dispatch_groups(&tx, crate::db::WorkerQueue::Job, now)?;
     let candidate: Option<i64> = tx
         .query_row(
-            "SELECT candidate.id FROM jobs AS candidate
-             WHERE candidate.state = 'pending'
-               AND candidate.job_type <> 'cleanup'
-               AND candidate.next_retry_epoch <= ?1
-               AND NOT (
-                   candidate.job_type = 'compile_rules'
-                   AND EXISTS (
-                       SELECT 1 FROM jobs AS predecessor
-                       WHERE predecessor.job_type = 'compile_rules'
-                         AND predecessor.project = candidate.project
-                         AND predecessor.state = 'processing'
-                   )
-               )
-             ORDER BY candidate.priority ASC,
-                      candidate.created_at_epoch ASC,
-                      candidate.id ASC
-             LIMIT 1",
+            &format!("SELECT ready.id FROM ({}) AS ready
+             JOIN worker_dispatch_state d ON d.scope = 'job' AND d.stage = ready.job_type
+               AND d.host = ready.host AND d.project = ready.project
+             ORDER BY COALESCE(d.last_claim_sequence, d.ready_sequence), d.last_claim_sequence IS NOT NULL,
+               ready.priority ASC, ready.created_at_epoch ASC, ready.id ASC LIMIT 1",
+                crate::db::READY_JOB_DISPATCH_SQL),
             params![now],
             |row| row.get(0),
         )
@@ -66,6 +56,7 @@ pub fn claim_next_job(
     }
 
     let job = load_claimed_job(&tx, job_id)?;
+    crate::db::record_job_dispatch(&tx, &job)?;
     tx.commit()?;
     Ok(Some(job))
 }

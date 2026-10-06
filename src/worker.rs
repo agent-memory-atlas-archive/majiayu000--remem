@@ -478,12 +478,14 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         if stop_for_exhausted_once_budget(&run_budget, Instant::now()) {
             break;
         }
-        if crate::extraction_worker::run_next(
-            &lease_owner,
-            JOB_LEASE_SECS,
-            EXTRACTION_TASK_TIMEOUT_SECS,
-        )
-        .await?
+        let extraction_first = db::preferred_worker_queue(&conn)? != Some(db::WorkerQueue::Job);
+        if extraction_first
+            && crate::extraction_worker::run_next(
+                &lease_owner,
+                JOB_LEASE_SECS,
+                EXTRACTION_TASK_TIMEOUT_SECS,
+            )
+            .await?
         {
             run_budget.record_work_items(1);
             continue;
@@ -546,6 +548,24 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
                 run_budget.record_work_items(1);
             }
             continue;
+        }
+
+        // The preferred job lane may have become empty after selection. Give
+        // eligible extraction its turn before considering idle-only work.
+        if !extraction_first {
+            if stop_for_exhausted_once_budget(&run_budget, Instant::now()) {
+                break;
+            }
+            if crate::extraction_worker::run_next(
+                &lease_owner,
+                JOB_LEASE_SECS,
+                EXTRACTION_TASK_TIMEOUT_SECS,
+            )
+            .await?
+            {
+                run_budget.record_work_items(1);
+                continue;
+            }
         }
 
         let enrichment_now = Instant::now();

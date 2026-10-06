@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::db::extraction_replay::mark_replay_range_failed;
 
@@ -13,14 +13,16 @@ pub fn claim_next_extraction_task(
     lease_secs: i64,
 ) -> Result<Option<ExtractionTask>> {
     let now = chrono::Utc::now().timestamp();
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    crate::db::register_ready_dispatch_groups(&tx, crate::db::WorkerQueue::Extraction, now)?;
     let candidate: Option<i64> = tx
         .query_row(
-            "SELECT id FROM extraction_tasks
-             WHERE status = 'pending'
-               AND (next_retry_epoch IS NULL OR next_retry_epoch <= ?1)
-             ORDER BY priority ASC, created_at_epoch ASC, id ASC
-             LIMIT 1",
+            &format!("SELECT ready.id FROM ({}) AS ready
+             JOIN worker_dispatch_state d ON d.scope = 'extraction' AND d.stage = ready.task_kind
+               AND d.host = CAST(ready.host_id AS TEXT) AND d.project = CAST(ready.project_id AS TEXT)
+             ORDER BY COALESCE(d.last_claim_sequence, d.ready_sequence), d.last_claim_sequence IS NOT NULL,
+               ready.priority ASC, ready.created_at_epoch ASC, ready.id ASC LIMIT 1",
+                crate::db::READY_EXTRACTION_DISPATCH_SQL),
             params![now],
             |row| row.get(0),
         )
@@ -72,7 +74,9 @@ pub(crate) fn claim_extraction_task_by_id_in_transaction(
         return Ok(None);
     }
 
-    Ok(Some(load_claimed_extraction_task(conn, task_id)?))
+    let task = load_claimed_extraction_task(conn, task_id)?;
+    crate::db::record_extraction_dispatch(conn, &task, lease_owner)?;
+    Ok(Some(task))
 }
 
 pub fn release_expired_extraction_task_leases(conn: &Connection) -> Result<usize> {

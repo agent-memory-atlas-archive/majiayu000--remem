@@ -476,6 +476,11 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/v094_extraction_completed_progress.sql"),
     },
     Migration {
+        version: 95,
+        name: "worker_fair_dispatch",
+        sql: include_str!("../migrations/v095_worker_fair_dispatch.sql"),
+    },
+    Migration {
         version: 96,
         name: "ai_usage_observation",
         sql: include_str!("../migrations/v096_ai_usage_observation.sql"),
