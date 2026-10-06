@@ -340,41 +340,50 @@ fn invalid_codex_home_keeps_claude_diagnostics_visible() {
         .args(["doctor", "--json"])
         .output()
         .unwrap();
-    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
-    let checks = report["checks"].as_array().unwrap();
+    let doctor_output = format!(
+        "doctor status: {}\nstdout:\n{}\nstderr:\n{}",
+        doctor.status,
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout)
+        .unwrap_or_else(|error| panic!("doctor JSON: {error}\n{doctor_output}"));
+    let checks = report["checks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("doctor checks array missing\n{doctor_output}"));
     for name in ["Hooks (claude)", "MCP (claude)"] {
         let check = checks
             .iter()
             .find(|check| check["name"] == name)
-            .expect(name);
-        assert_eq!(check["status"], "fail", "{check}");
-        assert!(
-            check["detail"].as_str().unwrap().contains("claude"),
-            "{check}"
-        );
+            .unwrap_or_else(|| panic!("missing {name} check\n{doctor_output}"));
+        assert_eq!(check["status"], "fail", "{check}\n{doctor_output}");
+        let detail = check["detail"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing {name} detail\n{doctor_output}"));
+        assert!(detail.contains("claude"), "{check}\n{doctor_output}");
     }
     for name in ["Hooks (codex)", "MCP (codex)", "Capture capability (codex)"] {
         let check = checks
             .iter()
             .find(|check| check["name"] == name)
-            .expect(name);
-        assert_eq!(check["status"], "fail", "{check}");
+            .unwrap_or_else(|| panic!("missing {name} check\n{doctor_output}"));
+        assert_eq!(check["status"], "fail", "{check}\n{doctor_output}");
+        let detail = check["detail"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing {name} detail\n{doctor_output}"));
         assert!(
-            check["detail"]
-                .as_str()
-                .unwrap()
-                .contains("invalid Codex home"),
-            "{check}"
+            detail.contains("invalid Codex home"),
+            "{check}\n{doctor_output}"
         );
     }
     let capability = checks
         .iter()
         .find(|check| check["name"] == "Capture capability (claude)")
-        .unwrap();
-    assert_eq!(capability["status"], "ok", "{capability}");
+        .unwrap_or_else(|| panic!("missing Capture capability (claude) check\n{doctor_output}"));
+    assert_eq!(capability["status"], "ok", "{capability}\n{doctor_output}");
     assert!(
         !root.join("data").exists(),
-        "doctor must not initialize a store"
+        "doctor must not initialize a store\n{doctor_output}"
     );
     std::fs::remove_dir_all(root).unwrap();
 }
