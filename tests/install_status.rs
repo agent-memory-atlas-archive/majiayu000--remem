@@ -387,3 +387,54 @@ fn invalid_codex_home_keeps_claude_diagnostics_visible() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn doctor_degraded_embedding_does_not_initialize_store_or_logs() {
+    let root = install_status_temp_root();
+    let codex_home = root.join("home/.codex");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let doctor = isolated_codex_command(&root, codex_home.as_os_str())
+        .env("REMEM_EMBEDDINGS_PROVIDER", "api")
+        .env("REMEM_EMBEDDINGS_FALLBACK", "feature-hash")
+        .env(
+            "REMEM_EMBEDDINGS_API_KEY_ENV",
+            "REMEM_DOCTOR_TEST_MISSING_API_KEY",
+        )
+        .env_remove("REMEM_EMBEDDINGS_API_KEY")
+        .env_remove("REMEM_EMBEDDING_API_KEY")
+        .env_remove("REMEM_DOCTOR_TEST_MISSING_API_KEY")
+        .env_remove("REMEM_EMBEDDINGS_MODEL_DIR")
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    let output = format!(
+        "doctor status: {}\nstdout:\n{}\nstderr:\n{}",
+        doctor.status,
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout)
+        .unwrap_or_else(|error| panic!("doctor JSON: {error}\n{output}"));
+    let embedding = report["checks"]
+        .as_array()
+        .expect("doctor checks array")
+        .iter()
+        .find(|check| check["name"] == "Embedding provider")
+        .unwrap_or_else(|| panic!("missing embedding check\n{output}"));
+    assert_eq!(embedding["status"], "warn", "{output}");
+    assert!(
+        embedding["detail"]
+            .as_str()
+            .unwrap()
+            .contains("using fallback feature-hash"),
+        "{output}"
+    );
+    let stderr = String::from_utf8_lossy(&doctor.stderr);
+    assert!(stderr.contains("[ERROR] [embedding]"), "{output}");
+    assert!(stderr.contains("using fallback feature-hash"), "{output}");
+    assert!(
+        !root.join("data").exists(),
+        "doctor must not initialize the store or logs\n{output}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
