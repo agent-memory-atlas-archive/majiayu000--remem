@@ -359,3 +359,44 @@ async fn pending_dependency_exception_rejects_processing_owned_foreign_and_unrel
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn due_maintenance_recovers_failed_memory_without_resetting_its_pending_graph_wait(
+) -> Result<()> {
+    let mut f = waiting_family().await?;
+    let before_graph = graph_wait_state(&f.conn, f.graph)?;
+    // Make the failed range a due transient maintenance candidate. Graph keeps
+    // the actual production Waiting state established by waiting_family.
+    f.conn.execute(
+        "UPDATE extraction_replay_ranges SET failure_class = 'transient', attempts = 1,
+             failed_at_epoch = ?1 WHERE id = ?2",
+        params![chrono::Utc::now().timestamp() - 1200, f.range],
+    )?;
+    let maintained = db::maintain_failure_lifecycle(&f.conn)?;
+    assert_eq!(maintained.retried_extraction_replay_ranges, 1);
+    assert_eq!(graph_wait_state(&f.conn, f.graph)?, before_graph);
+    assert!(db::claim_extraction_task_by_id(&mut f.conn, f.graph, "too-early", 60)?.is_none());
+    for id in [f.parent.id, f.memory] {
+        let task = db::claim_extraction_task_by_id(&mut f.conn, id, "maintenance", 60)?.unwrap();
+        db::mark_extraction_task_done(&f.conn, id, "maintenance", task.high_watermark_event_id)?;
+    }
+    assert_eq!(graph_wait_state(&f.conn, f.graph)?, before_graph);
+    f.conn.execute(
+        "UPDATE extraction_tasks SET next_retry_epoch = 0 WHERE id = ?1",
+        [f.graph],
+    )?;
+    let graph = db::claim_extraction_task_by_id(&mut f.conn, f.graph, "maintenance", 60)?.unwrap();
+    assert_graph_unblocked(&mut f.conn, &graph).await?;
+    db::mark_extraction_task_done(&f.conn, graph.id, "maintenance", Some(f.events[3]))?;
+    assert_eq!(
+        db::get_extraction_replay_range_evidence(&f.conn, f.range)?
+            .range
+            .status,
+        "replayed"
+    );
+    assert_eq!(
+        db::maintain_failure_lifecycle(&f.conn)?.retried_extraction_replay_ranges,
+        0
+    );
+    Ok(())
+}
