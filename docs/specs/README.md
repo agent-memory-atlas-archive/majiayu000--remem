@@ -72,7 +72,7 @@ The CI lifecycle guard enforces the highest-risk parts of this flow. See
 | `context-budget-config/` | Current contract | SessionStart numeric budgets live in `config.toml` `[context]`; `REMEM_CONTEXT_*` remains an env escape hatch with the previous parse rules. |
 | `pricing-config/` | Current contract | USD cost overrides live in `config.toml` `[pricing]`; `REMEM_PRICE_*` remains an env escape hatch. Init writes an empty table and does not pin compiled family rates. |
 | `prompt-time-candidate-index/` | Current contract | Codex UserPromptSubmit activation and the compact prompt-time candidate index: first-turn continuity anchors plus existing hybrid RRF memory leads, with no final confidence threshold or body preload. |
-| `candidate-auto-promotion/` | Current contract | Closed candidate risk rubric, claim-level source support, phrase-specific secret blocking, and controlled observation-path promotion for directly supported failure lessons. Refs #955, #942. |
+| `candidate-auto-promotion/` | Current contract | Closed candidate risk rubric, claim-level source support, phrase-specific secret blocking, controlled observation-path failure-lesson promotion, and evidence-versioned reassessment of untouched pending content without erasing human review or suppression. Refs #955, #942, #1105. |
 | `capacity-eval-axis/` | Current contract | Product and technical contract for the retrieval-quality-vs-store-size degradation curve: seeded corpus synthesis, per-channel metrics, and a regression budget wired into eval gates. Refs #675, #384. |
 | `current-memory-contracts/` | Current contract | Product and technical contract for converging existing memory truth, temporal facts, injection audits, usage feedback, staleness labels, automatic lifecycle maintenance, observability, and host/app boundaries without a second rewrite. Refs #381, #383, #384, #385, #390, #945, #948. |
 | `specs/GH823/` | Implemented historical reference (PR #922; Stop wiring consumed by PR #924) | Historical issue packet for the Cursor host runtime protocol: strict identity/event parsing, pre-capture PII removal, bounded nested tool-field decoding, verbatim generic capture, #825-gated stop transcripts, and the #822 real-host/MCP evidence gate. Refs #823, #821, #822, #825. |
@@ -111,12 +111,12 @@ The CI lifecycle guard enforces the highest-risk parts of this flow. See
 | `spec-lifecycle-governance/` | Current contract | Product and technical contract for separating epic, spec, and implementation issue lifecycles. Refs #592. |
 | `status-health-performance/` | Current contract | Product and technical contract for splitting fast API liveness from cached aggregate status diagnostics. Refs #588. |
 | `summary-candidate-promotion/` | Superseded reference | Original #674 survey contract for the summary-path promotion stall. Superseded by `summary-promotion-gate/`; keep for evidence and rationale only. Refs #674, #381, #383. |
-| `summary-promotion-gate/` | Current contract | Product and technical contract for a source-path-aware auto-promote gate on summary-derived candidates: source_kind split, shadow-then-enforce rollout, doctor observability, and candidate-specific captured-event binding. Refs #674, #942. |
+| `summary-promotion-gate/` | Current contract | Product and technical contract for a source-path-aware auto-promote gate on summary-derived candidates: source_kind split, shadow-then-enforce rollout, doctor observability, candidate-specific captured-event binding, and exact automatic activation proof for current-context admission at the unchanged summary confidence. Refs #674, #942, #1105. |
 | `user-context-layer/` | Current contract | Product and technical contract for auditable user-level context: manual claims, editable profile summaries, suppression/feedback, on-demand recall, and guarded automatic extraction. Refs #574-#579. |
 | `user-memory-policy-refinements/` | Current contract | Product and technical contract for profile Markdown snapshots, natural usage policy, and automatic extraction non-retention rules. Refs #617-#620. |
 | `workstream-identity-continuity/` | Current contract | Product and technical contract for preserving canonical workstream identity across title drift, aliases, and rename chains. Refs #603. |
 
-| `legacy-unverified-context/` | Current contract | Read-only trust/visibility projection, recovery labels, and CurrentTruth/SessionStart quarantine boundary. Refs #1017. |
+| `legacy-unverified-context/` | Current contract | Read-only trust/visibility projection, recovery labels, CurrentTruth/SessionStart quarantine boundary, and a batched summary confidence proof that preserves all other trust/lifecycle checks. Refs #1017, #1105. |
 
 ## Top-Level Specs
 

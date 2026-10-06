@@ -196,6 +196,15 @@ Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
 dropped or routed to review with a diagnosable reason.
 
+Automatically promoted summary decisions and discoveries can enter current
+context at their original summary confidence when captured local evidence,
+the current summary gate, and the exact activation receipt still validate.
+External content and missing or changed proof remain review-gated or excluded.
+New trusted evidence can reconsider identical content that is still pending
+review: remem preserves the original snapshot and links it to a fresh candidate.
+Repeated evidence, human review decisions, quarantine, and suppression are
+preserved. Expired operational state needs fresh evidence before renewal.
+
 For module ownership and current data flow, read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

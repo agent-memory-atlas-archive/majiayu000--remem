@@ -16,6 +16,7 @@ pub struct ScopedTestDataDir {
     previous: Option<OsString>,
     previous_allow_plaintext: Option<OsString>,
     previous_cipher_key: Option<OsString>,
+    offline_previous: Vec<(&'static str, Option<OsString>)>,
     pub path: PathBuf,
 }
 
@@ -47,8 +48,29 @@ impl ScopedTestDataDir {
             previous,
             previous_allow_plaintext,
             previous_cipher_key,
+            offline_previous: Vec::new(),
             path,
         }
+    }
+
+    /// Deterministic capture/governance fixtures must not inherit a real
+    /// provider, host configuration file, or a shadow context-admission mode.
+    pub fn new_offline(label: &str) -> Self {
+        let mut directory = Self::new(label);
+        for (key, value) in [
+            (
+                "REMEM_CONFIG",
+                directory.path.join("config.toml").into_os_string(),
+            ),
+            ("REMEM_EMBEDDINGS_PROVIDER", OsString::from("feature-hash")),
+            ("REMEM_CURRENT_CONTEXT_GATE", OsString::from("enforce")),
+        ] {
+            directory
+                .offline_previous
+                .push((key, std::env::var_os(key)));
+            std::env::set_var(key, value);
+        }
+        directory
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -67,6 +89,13 @@ impl ScopedTestDataDir {
 
 impl Drop for ScopedTestDataDir {
     fn drop(&mut self) {
+        for (key, value) in &self.offline_previous {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
         if let Some(previous) = self.previous.as_ref() {
             std::env::set_var("REMEM_DATA_DIR", previous);
         } else {

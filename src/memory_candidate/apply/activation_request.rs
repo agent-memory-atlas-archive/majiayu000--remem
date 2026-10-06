@@ -7,7 +7,7 @@ use crate::memory::poisoning::SourceTrustClass;
 use super::{CandidateRoute, ParsedMemoryCandidate};
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn build(
+pub(in crate::memory_candidate) fn build(
     source_project: &str,
     memory_project: &str,
     memory_scope: &str,

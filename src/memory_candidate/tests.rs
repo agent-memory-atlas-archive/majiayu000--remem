@@ -12,6 +12,7 @@ mod existing_preferences;
 mod lesson_outcome;
 mod poisoning;
 mod preference_reinforcement;
+mod reassessment;
 mod spo_facts;
 mod ttl;
 

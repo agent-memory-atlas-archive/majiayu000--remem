@@ -265,7 +265,7 @@ pub(crate) fn validate_trust_class(value: &str) -> Result<()> {
     }
 }
 
-fn event_trust_class(
+pub(crate) fn event_trust_class(
     event_type: &str,
     role: Option<&str>,
     tool_name: Option<&str>,

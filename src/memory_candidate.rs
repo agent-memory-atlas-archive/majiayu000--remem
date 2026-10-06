@@ -11,10 +11,12 @@ use crate::memory::poisoning::{
 
 mod apply;
 mod auto_promote;
+mod current_proof;
 mod evidence_binding;
 mod fact_extract;
 mod parse;
 mod prompt;
+mod reassessment;
 pub(crate) mod review;
 pub(crate) mod review_stats;
 pub(crate) mod route;
@@ -26,6 +28,7 @@ use apply::{
 };
 pub(crate) use auto_promote::contains_unsafe_memory_marker;
 use auto_promote::{candidate_promotion_decision, CandidatePromotionDecision};
+pub(crate) use current_proof::summary_current_confidence_proofs;
 use evidence_binding::SummaryEvidenceResolver;
 use parse::{normalize_memory_type, normalize_scope, normalize_topic_key};
 use parse::{parse_defer_reason, parse_memory_candidates};
@@ -443,7 +446,8 @@ fn persist_candidate_rows(
     candidates: &[ParsedMemoryCandidate],
     auto_promote_batch: Option<&ObservationBatch>,
 ) -> Result<CandidatePersistSummary> {
-    let tx = conn.transaction()?;
+    // Serialize identity, human-review, and suppression decisions before reads.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut summary = CandidatePersistSummary::default();
     let summary_evidence_resolver = if source.source_kind == SOURCE_KIND_SUMMARY {
         Some(SummaryEvidenceResolver::load(
@@ -470,30 +474,48 @@ fn persist_candidate_rows(
             &candidate.text,
             now,
         );
-        if candidate_exists(
-            &tx,
-            source.project_id,
-            candidate,
-            &evidence_json,
-            expires_at_epoch.is_some(),
-            now,
-        )? {
-            continue;
-        }
-
         let route = route_candidate(
             source.project,
             source.session_id,
             candidate,
             source.route_texts.iter().copied(),
         );
+        let source_trust = derive_source_trust_class(&tx, evidence_event_ids, source.source_kind)?;
+        let reassessment = if candidate.memory_type == "preference" {
+            // Preference reinforcement has its own evidence-aware identity.
+            if preference_candidate_exists(
+                &tx,
+                source.project_id,
+                candidate,
+                &evidence_json,
+                expires_at_epoch.is_some(),
+                now,
+            )? {
+                continue;
+            }
+            reassessment::ReassessmentPlan::default()
+        } else {
+            let Some(plan) = reassessment::plan(
+                &tx,
+                source.project_id,
+                candidate,
+                evidence_event_ids,
+                &route,
+                source_trust,
+                expires_at_epoch.is_some(),
+                now,
+            )?
+            else {
+                continue;
+            };
+            plan
+        };
         let state_key = crate::memory::state_key::derive_state_key(
             &candidate.memory_type,
             Some(&candidate.topic_key),
             &candidate_title(candidate),
             &candidate.text,
         );
-        let source_trust = derive_source_trust_class(&tx, evidence_event_ids, source.source_kind)?;
         let quarantine_match = scan_instruction_pattern(&candidate.text);
         let review_status = if quarantine_match.is_some() {
             "quarantined"
@@ -547,6 +569,7 @@ fn persist_candidate_rows(
             ],
         )?;
         let candidate_id = tx.last_insert_rowid();
+        reassessment.finish(&tx, candidate_id, candidate, &route, &evidence_json, now)?;
         summary.candidates += 1;
 
         if let Some(matched) = quarantine_match {
@@ -652,7 +675,7 @@ fn persist_candidate_rows(
     Ok(summary)
 }
 
-fn candidate_exists(
+fn preference_candidate_exists(
     conn: &Connection,
     project_id: i64,
     candidate: &ParsedMemoryCandidate,
@@ -668,10 +691,10 @@ fn candidate_exists(
                AND memory_type = ?3
                AND topic_key = ?4
                AND text = ?5
-               AND (?6 = 0 OR evidence_event_ids = ?7)
+               AND evidence_event_ids = ?6
                AND (
-                    ?8 = 0
-                    OR (expires_at_epoch IS NOT NULL AND expires_at_epoch > ?9)
+                    ?7 = 0
+                    OR (expires_at_epoch IS NOT NULL AND expires_at_epoch > ?8)
                )
              LIMIT 1",
             params![
@@ -680,11 +703,6 @@ fn candidate_exists(
                 candidate.memory_type,
                 candidate.topic_key,
                 candidate.text,
-                if candidate.memory_type == "preference" {
-                    1_i64
-                } else {
-                    0_i64
-                },
                 evidence_json,
                 if candidate_has_ttl { 1_i64 } else { 0_i64 },
                 now_epoch

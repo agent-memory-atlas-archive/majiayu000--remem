@@ -1,9 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::Connection;
 
-use crate::memory::poisoning::{derive_source_trust_class, SourceTrustClass};
+use crate::memory::poisoning::{
+    event_trust_class, scan_source_instruction_pattern, SourceTrustClass,
+};
 
 use super::support::supporting_source_groups;
 use super::ParsedMemoryCandidate;
@@ -15,7 +17,7 @@ pub(super) struct SummaryCandidateEvidence {
 }
 
 pub(super) struct SummaryEvidenceResolver {
-    events: Vec<CapturedSourceEvent>,
+    events: BTreeMap<i64, CapturedSourceEvent>,
 }
 
 #[derive(Debug)]
@@ -29,23 +31,28 @@ impl SummaryEvidenceResolver {
     pub(super) fn load(
         conn: &Connection,
         evidence_event_ids: &[i64],
-        source_kind: &str,
+        _source_kind: &str,
     ) -> Result<Self> {
         Ok(Self {
-            events: load_captured_source_events(conn, evidence_event_ids, source_kind)?,
+            events: load_captured_source_events(conn, evidence_event_ids)?,
         })
     }
 
     pub(super) fn resolve(&self, candidate: &ParsedMemoryCandidate) -> SummaryCandidateEvidence {
-        let Some(selected_ids) = bind_candidate_to_events(candidate, &self.events) else {
+        let events = self.events.values().collect::<Vec<_>>();
+        let Some(selected_ids) = bind_candidate_to_events(candidate, &events) else {
             return SummaryCandidateEvidence {
                 event_ids: None,
-                source_texts: self.events.iter().map(|event| event.text.clone()).collect(),
+                source_texts: self
+                    .events
+                    .values()
+                    .map(|event| event.text.clone())
+                    .collect(),
             };
         };
         let source_texts = self
             .events
-            .iter()
+            .values()
             .filter(|event| selected_ids.contains(&event.id))
             .map(|event| event.text.clone())
             .collect();
@@ -54,11 +61,38 @@ impl SummaryEvidenceResolver {
             source_texts,
         }
     }
+
+    /// Reuse a batch's loaded sources without letting another candidate's
+    /// events authorize this one. Every recorded event must still be present,
+    /// safe, and part of the deterministic per-claim support binding.
+    pub(super) fn proof_sources<'a>(
+        &'a self,
+        candidate: &ParsedMemoryCandidate,
+        event_ids: &[i64],
+    ) -> Option<(Vec<&'a str>, SourceTrustClass)> {
+        let events = event_ids
+            .iter()
+            .map(|id| self.events.get(id))
+            .collect::<Option<Vec<_>>>()?;
+        if events.is_empty()
+            || events
+                .iter()
+                .any(|event| scan_source_instruction_pattern(&event.text).is_some())
+            || bind_candidate_to_events(candidate, &events)? != event_ids.iter().copied().collect()
+        {
+            return None;
+        }
+        let trust = events.iter().map(|event| event.trust).min()?;
+        Some((
+            events.iter().map(|event| event.text.as_str()).collect(),
+            trust,
+        ))
+    }
 }
 
 fn bind_candidate_to_events(
     candidate: &ParsedMemoryCandidate,
-    events: &[CapturedSourceEvent],
+    events: &[&CapturedSourceEvent],
 ) -> Option<BTreeSet<i64>> {
     let source_texts = events
         .iter()
@@ -70,7 +104,7 @@ fn bind_candidate_to_events(
     for group in groups {
         let mut best: Option<&CapturedSourceEvent> = None;
         for source_index in group {
-            let Some(event) = events.get(source_index) else {
+            let Some(&event) = events.get(source_index) else {
                 continue;
             };
             let should_replace = best.is_none_or(|current| {
@@ -89,10 +123,13 @@ fn bind_candidate_to_events(
 fn load_captured_source_events(
     conn: &Connection,
     evidence_event_ids: &[i64],
-    source_kind: &str,
-) -> Result<Vec<CapturedSourceEvent>> {
+) -> Result<BTreeMap<i64, CapturedSourceEvent>> {
+    if evidence_event_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(
+        "SELECT e.id, e.event_type, e.role, e.tool_name, e.content_text,
+                COALESCE(
                     CASE
                         WHEN b.content_encoding = 'plain' THEN CAST(b.content_bytes AS TEXT)
                         ELSE NULL
@@ -102,24 +139,24 @@ fn load_captured_source_events(
                 ) AS content
          FROM captured_events e
          LEFT JOIN event_blobs b ON b.id = e.content_blob_id
-         WHERE e.id = ?1",
+         WHERE e.id IN (SELECT value FROM json_each(?1)) ORDER BY e.id",
     )?;
-    let mut events = Vec::new();
     let unique_ids = evidence_event_ids.iter().copied().collect::<BTreeSet<_>>();
-    for event_id in unique_ids {
-        let text = stmt
-            .query_row(params![event_id], |row| row.get::<_, String>(0))
-            .optional()?
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty());
-        let Some(text) = text else {
-            continue;
-        };
-        events.push(CapturedSourceEvent {
-            id: event_id,
-            text,
-            trust: derive_source_trust_class(conn, &[event_id], source_kind)?,
-        });
-    }
-    Ok(events)
+    let rows = stmt.query_map([serde_json::to_string(&unique_ids)?], |row| {
+        Ok(CapturedSourceEvent {
+            id: row.get(0)?,
+            text: row.get::<_, String>(5)?.trim().to_string(),
+            trust: event_trust_class(
+                &row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?.as_deref(),
+                row.get::<_, Option<String>>(3)?.as_deref(),
+                row.get::<_, Option<String>>(4)?.as_deref(),
+            ),
+        })
+    })?;
+    Ok(crate::db::query::collect_rows(rows)?
+        .into_iter()
+        .filter(|event| !event.text.is_empty())
+        .map(|event| (event.id, event))
+        .collect())
 }

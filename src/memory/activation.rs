@@ -192,6 +192,24 @@ pub(crate) fn activation_id_from_key(namespace: &str, key: &str) -> String {
     format!("{namespace}:{}", payload_sha256(&[key]))
 }
 
+/// Compare a read-only proof with the same request fingerprints used at the
+/// activation boundary. This grants no write permit and never repairs a receipt.
+pub(crate) fn request_fingerprint_matches(
+    request: &ActiveMemoryWriteRequest,
+    stored_sha256: &str,
+    stored_result_trust_class: &str,
+) -> Result<bool> {
+    let superseded_ids = validate_request(request)?;
+    Ok(
+        (stored_result_trust_class == request.result_source_trust.as_str()
+            && stored_sha256 == receipt::current_request_sha256(request, &superseded_ids)?)
+            || (request.result_source_trust == request.source_trust
+                && stored_result_trust_class.strip_prefix("legacy_v086_source_")
+                    == Some(request.source_trust.as_str())
+                && stored_sha256 == receipt::v086_request_sha256(request, &superseded_ids)?),
+    )
+}
+
 pub(crate) fn ephemeral_activation_id(namespace: &str, payload_hash: &str) -> String {
     let counter = ACTIVATION_NONCE.fetch_add(1, Ordering::Relaxed);
     let nanos = chrono::Utc::now()

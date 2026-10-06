@@ -1,13 +1,35 @@
 # Summary Promotion Gate Product Spec
 
 Status: Current contract
-Date: 2026-07-02
+
+Date: 2026-07-02; current-context amendment: 2026-10-06
 
 Tracking:
 - Spec/tracking issue: #674
 - Production evidence follow-up: #942
 - Evidence baseline: re-verification comment on #674 (2026-07-02)
 - Downstream evidence consumers: #381, #383
+- Audit remediation: #1105
+
+## Audited current-context admission (GH-1105)
+
+A successfully auto-promoted summary decision or discovery must remain usable
+by default current-context readers when its exact captured support, repository
+ownership, lifecycle, and immutable activation receipt still validate. Summary
+confidence remains the existing summary-path value; promotion must not inflate
+it to satisfy a different reader's generic confidence threshold.
+
+The reader may apply the summary gate's own confidence policy only to an exact
+`summary` / `auto_promoted` candidate with a matching automatic activation
+request and result. It rechecks the current summary safety and source-support
+policy. Missing receipts, changed payloads or provenance, external support,
+manual review, and unrelated activation routes do not qualify. Normal lifecycle,
+validity, mutable-state identity, suppression, and injection-time poisoning
+checks still apply. Existing historical inspection remains available separately.
+
+Verification uses deterministic production capture/promotion fixtures followed
+by CurrentTruth and SessionStart admission, with local-tool/repository positives
+and external, missing-proof, changed-proof, lifecycle, and suppression negatives.
 
 ## Problem
 

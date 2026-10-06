@@ -154,6 +154,7 @@ struct Row {
     candidate_has_proof: bool,
     direct_evidence_resolves: bool,
     state_key_resolves: bool,
+    summary_confidence_proof: bool,
 }
 const VISIBILITY_PROJECTION_SQL: &str =
     "SELECT id, status, memory_type, topic_key, source_candidate_id, evidence_event_ids,
@@ -224,6 +225,7 @@ fn read_visibility_row(row: &SqlRow<'_>) -> rusqlite::Result<Row> {
         candidate_has_proof: row.get(13)?,
         direct_evidence_resolves: row.get(14)?,
         state_key_resolves: row.get(15)?,
+        summary_confidence_proof: false,
     })
 }
 
@@ -267,9 +269,21 @@ pub fn classify_memories(
                 Ok((row.get::<_, i64>(0)?, read_visibility_row(row)?))
             })
             .context("query batch memory trust and visibility classification")?;
-        for row in rows {
-            let (id, visibility_row) =
-                row.context("read batch memory trust and visibility classification row")?;
+        let rows = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read batch memory trust and visibility classification row")?;
+        let summary_candidates = rows
+            .iter()
+            .filter(|(_, row)| {
+                classify_row(row, as_of_epoch).reason
+                    == MemoryVisibilityReason::ConfidenceBelowFloor
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        let summary_proofs =
+            crate::memory_candidate::summary_current_confidence_proofs(conn, &summary_candidates)?;
+        for (id, mut visibility_row) in rows {
+            visibility_row.summary_confidence_proof = summary_proofs.contains(&id);
             classifications.insert(id, classify_row(&visibility_row, as_of_epoch));
         }
     }
@@ -409,7 +423,9 @@ fn classify_row(row: &Row, as_of: i64) -> MemoryVisibility {
                 MemoryVisibilityReason::ConfidenceMissing,
             );
         };
-        if !confidence.is_finite() || confidence < CURRENT_CONFIDENCE_FLOOR {
+        if !confidence.is_finite()
+            || (confidence < CURRENT_CONFIDENCE_FLOOR && !row.summary_confidence_proof)
+        {
             return MemoryVisibility::excluded(
                 MemoryVisibilityClass::LegacyUnverified,
                 MemoryVisibilityReason::ConfidenceBelowFloor,
@@ -496,6 +512,7 @@ mod tests {
             candidate_has_proof: true,
             direct_evidence_resolves: true,
             state_key_resolves: true,
+            summary_confidence_proof: false,
         }
     }
     #[test]

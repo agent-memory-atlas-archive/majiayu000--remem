@@ -2,7 +2,17 @@
 
 Status: Current contract
 
-Refs #1017.
+## Summary activation proof amendment (GH-1105)
+
+The generic 0.80 confidence requirement has one route-specific proof arm:
+an exact, receipt-backed automatic summary promotion that still passes the
+summary gate may use that gate's confidence policy. This preserves the original
+summary confidence instead of manufacturing a higher score. It is not a trust
+class exemption: external content, missing or changed receipts/provenance,
+manual approvals, lifecycle exclusions, and suppression remain governed by the
+existing boundaries. No unverified historical row is backfilled or rewritten.
+
+Refs #1017, #1105.
 
 Implementation status: Accepted and merged in PR #1019 on 2026-08-15. The
 copied-production-database validation and the focused #1017 acceptance audit

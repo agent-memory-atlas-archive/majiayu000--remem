@@ -12,6 +12,7 @@ mod poisoning;
 mod range_side_effects;
 mod session_labels;
 mod side_effects;
+mod summary_current;
 mod summary_evidence;
 
 fn setup_conn() -> Connection {

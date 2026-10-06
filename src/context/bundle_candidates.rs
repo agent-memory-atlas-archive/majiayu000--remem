@@ -14,7 +14,7 @@
 //! canonical data.
 
 use anyhow::{bail, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 
 use crate::context_bundle::{
     ChannelKind, ContextItem, ItemValidity, PreselectionDrop, SourceKind, TrustClass,
@@ -126,28 +126,41 @@ pub(crate) fn load_session_start_candidates_with_limits(
 /// remain standard unless the poisoning gate quarantined them separately.
 fn apply_persisted_memory_trust(conn: &Connection, items: &mut [ContextItem]) -> Result<()> {
     let as_of_epoch = chrono::Utc::now().timestamp();
-    for item in items {
-        let Some(memory_id) = item
-            .stable_key
+    let memory_id = |item: &ContextItem| {
+        item.stable_key
             .strip_prefix("memory:")
             .and_then(|value| value.parse::<i64>().ok())
-        else {
+    };
+    let memory_ids = items.iter().filter_map(memory_id).collect::<HashSet<_>>();
+    if memory_ids.is_empty() {
+        return Ok(());
+    }
+    let visibility = crate::truth::admit_many_for_current_context(
+        conn,
+        &memory_ids.iter().copied().collect::<Vec<_>>(),
+        as_of_epoch,
+    )?;
+    let mut statement = conn.prepare(
+        "SELECT id FROM memories WHERE source_trust_class = 'user_prompt'
+         AND id IN (SELECT value FROM json_each(?1))",
+    )?;
+    let trusted_ids = statement
+        .query_map([serde_json::to_string(&memory_ids)?], |row| {
+            row.get::<_, i64>(0)
+        })?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    for item in items {
+        let Some(memory_id) = memory_id(item) else {
             continue;
         };
-        if !crate::truth::admit_for_current_context(conn, memory_id, as_of_epoch)?
-            .current_context_eligible
+        if !visibility
+            .get(&memory_id)
+            .is_some_and(|row| row.current_context_eligible)
         {
             item.trust = TrustClass::Quarantined;
             continue;
         }
-        let source_trust: Option<String> = conn
-            .query_row(
-                "SELECT source_trust_class FROM memories WHERE id = ?1",
-                [memory_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if source_trust.as_deref() == Some("user_prompt") {
+        if trusted_ids.contains(&memory_id) {
             item.trust = TrustClass::Trusted;
         }
     }
