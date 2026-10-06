@@ -310,6 +310,13 @@ async fn worker_once_records_startup_heartbeat_without_work() -> anyhow::Result<
         heartbeat.started_at_epoch <= heartbeat.updated_at_epoch,
         "heartbeat should be valid immediately after singleton acquisition"
     );
+    anyhow::ensure!(
+        heartbeat.pid.is_none(),
+        "a completed once worker must retire its heartbeat"
+    );
+    anyhow::ensure!(
+        db::healthy_worker_heartbeat(&conn, db::WORKER_HEARTBEAT_HEALTH_SECS)?.is_none()
+    );
     Ok(())
 }
 
@@ -744,6 +751,10 @@ async fn worker_heartbeat_updates_in_loop() -> anyhow::Result<()> {
     anyhow::ensure!(
         heartbeat.updated_at_epoch >= heartbeat.started_at_epoch,
         "heartbeat should advance updated_at_epoch"
+    );
+    anyhow::ensure!(
+        heartbeat.pid.is_none(),
+        "cancelling a daemon must retire its heartbeat"
     );
     Ok(())
 }

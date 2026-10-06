@@ -131,7 +131,7 @@ pub(super) fn check_mcp() -> Vec<Check> {
     match active_hosts() {
         Ok(hosts) => check_mcp_for(hosts),
         Err(error) => vec![Check::new(
-                "MCP (codex)",
+            "MCP (codex)",
             Status::Fail,
             format!("invalid Codex home: {error}"),
         )],
