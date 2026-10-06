@@ -1,3 +1,5 @@
+use super::SchemaInvariant;
+
 mod legacy;
 mod v067;
 mod v068;
