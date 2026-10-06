@@ -5,6 +5,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
 jobs:
+  windows_runtime_regressions:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Windows worker liveness and heartbeat retirement
+        run: cargo test --locked --no-default-features --lib db::worker -- --test-threads=1
+      - name: Verify selected Codex profile paths
+        run: cargo test --locked --no-default-features --test install_status -- --test-threads=1
   check:
     runs-on: ubuntu-latest
     steps:
