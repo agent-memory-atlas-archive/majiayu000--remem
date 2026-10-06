@@ -154,7 +154,29 @@ where
 
     let (prompt, transcript_evidence) = loop {
         task.high_watermark_event_id = Some(range.to_event_id);
-        let transcript = transcript_evidence::load_prompt_transcript_evidence(&range)?;
+        let transcript = match transcript_evidence::load_prompt_transcript_evidence(&range) {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                // Prompt eligibility does not discard raw history. Drain Stop
+                // sources from this attempted event range using the existing
+                // raw archive policy. Successful input selection still drains
+                // after the shrink loop below.
+                if let Err(raw_error) =
+                    side_effects::drain_raw_archive_from_range(conn, task, &range)
+                {
+                    crate::log::error(
+                        "session-rollup",
+                        &format!(
+                            "raw archive preservation failed after prompt evidence rejection task={} range={}..{}: {raw_error:#}",
+                            task.id, range.from_event_id, range.to_event_id
+                        ),
+                    );
+                }
+                // Keep the original source error and its failure class. A raw
+                // archive I/O failure must not downgrade missing evidence.
+                return Err(error);
+            }
+        };
         let prompt = prompt::build_rollup_prompt(task, &range, &transcript);
         if db::extraction_prompt_fits(SESSION_ROLLUP_SYSTEM, &prompt)
             && prompt::captured_transcript_events_fit(&range, &transcript)

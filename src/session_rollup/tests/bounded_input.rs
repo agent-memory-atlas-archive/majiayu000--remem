@@ -141,3 +141,179 @@ async fn rollup_captured_transcript_budget_never_omits_claimed_prefix_events() -
     assert_eq!(task.high_watermark_event_id, Some(included as i64));
     Ok(())
 }
+
+fn write_error_path_transcript(
+    directory: &std::path::Path,
+    filename: &str,
+    session_id: &str,
+    text: &str,
+) -> Result<std::path::PathBuf> {
+    let path = directory.join(filename);
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": session_id,
+            "cwd": "/tmp/remem",
+            "message": {"content": [{"type": "text", "text": text}]}
+        })
+        .to_string(),
+    )?;
+    Ok(path)
+}
+
+fn assert_no_rollup_generation_or_checkpoint(conn: &Connection, task_id: i64) -> Result<()> {
+    assert_eq!(summary_count(conn), 0);
+    let counts: (i64, i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM memory_candidates),
+                (SELECT COUNT(*) FROM jobs),
+                (SELECT COUNT(*) FROM extraction_tasks WHERE task_kind != 'session_rollup')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(counts, (0, 0, 0));
+    let checkpoint: (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT cursor_event_id, completed_event_id FROM extraction_tasks WHERE id = ?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(checkpoint, (None, None));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollup_prompt_evidence_failure_archives_only_attempted_prefix_idempotently() -> Result<()>
+{
+    let data_dir = crate::db::test_support::ScopedTestDataDir::new("rollup-error-archive-prefix");
+    std::fs::create_dir_all(&data_dir.path)?;
+    let session_id = "rollup-error-archive-prefix";
+    let first_text = "Raw history from the failed attempted prefix.";
+    let tail_text = "Later raw history must wait for its own attempt.";
+    let first = write_error_path_transcript(&data_dir.path, "first.jsonl", session_id, first_text)?;
+    let tail = write_error_path_transcript(&data_dir.path, "tail.jsonl", session_id, tail_text)?;
+    let mut conn = setup_conn();
+    let task_id = capture(
+        &conn,
+        session_id,
+        "session_stop",
+        &serde_json::json!({
+            "session_id": session_id, "cwd": "/tmp/remem", "transcript_path": first
+        })
+        .to_string(),
+    )?;
+    let batch = db::CAPTURED_EVENT_BATCH_LIMIT as i64;
+    for index in 1..batch {
+        capture(
+            &conn,
+            session_id,
+            "tool_result",
+            &format!("prefix event {index}"),
+        )?;
+    }
+    capture(
+        &conn,
+        session_id,
+        "session_stop",
+        &serde_json::json!({
+            "session_id": session_id, "cwd": "/tmp/remem", "transcript_path": tail
+        })
+        .to_string(),
+    )?;
+    let mut task = db::claim_extraction_task_by_id(&mut conn, task_id, "worker-a", 60)?
+        .expect("captured rollup task");
+    assert_eq!(task.high_watermark_event_id, Some(batch + 1));
+
+    let model_calls = std::cell::Cell::new(0);
+    for _ in 0..2 {
+        let error = process_with_summarizer_in_range(&mut conn, &mut task, |_prompt| {
+            model_calls.set(model_calls.get() + 1);
+            async { anyhow::bail!("prompt-evidence rejection must precede generation") }
+        })
+        .await
+        .expect_err("legacy transcript without captured fallback remains invalid model input");
+        assert!(
+            error.to_string().contains("transcript_byte_len"),
+            "{error:#}"
+        );
+        assert_eq!(
+            db::classify_failure_error(&error),
+            db::FailureClass::Permanent
+        );
+        assert_eq!(model_calls.get(), 0);
+        assert_eq!(task.high_watermark_event_id, Some(batch));
+        assert_no_rollup_generation_or_checkpoint(&conn, task_id)?;
+        let archived: (i64, i64) = conn.query_row(
+            "SELECT SUM(content = ?1), SUM(content = ?2) FROM raw_messages",
+            params![first_text, tail_text],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(archived, (1, 0));
+        let durable_target: Option<i64> = conn.query_row(
+            "SELECT high_watermark_event_id FROM extraction_tasks WHERE id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(durable_target, Some(batch + 1));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollup_prompt_evidence_failure_keeps_archive_error_visible_and_permanent() -> Result<()> {
+    let data_dir = crate::db::test_support::ScopedTestDataDir::new("rollup-error-archive-failure");
+    std::fs::create_dir_all(&data_dir.path)?;
+    let session_id = "rollup-error-archive-failure";
+    let transcript = write_error_path_transcript(
+        &data_dir.path,
+        "failed.jsonl",
+        session_id,
+        "Raw archive insertion is deliberately blocked.",
+    )?;
+    let mut conn = setup_conn();
+    let task_id = capture(
+        &conn,
+        session_id,
+        "session_stop",
+        &serde_json::json!({
+            "session_id": session_id, "cwd": "/tmp/remem", "transcript_path": transcript
+        })
+        .to_string(),
+    )?;
+    let mut task = db::claim_extraction_task_by_id(&mut conn, task_id, "worker-a", 60)?
+        .expect("captured rollup task");
+    conn.execute_batch(
+        "CREATE TRIGGER fail_prompt_error_archive BEFORE INSERT ON raw_messages
+         BEGIN SELECT RAISE(FAIL, 'forced prompt-error raw archive failure'); END;",
+    )?;
+    let model_calls = std::cell::Cell::new(0);
+    let error = process_with_summarizer_in_range(&mut conn, &mut task, |_prompt| {
+        model_calls.set(model_calls.get() + 1);
+        async { anyhow::bail!("prompt-evidence rejection must precede generation") }
+    })
+    .await
+    .expect_err("archive failure must not replace the original missing-evidence error");
+    assert!(
+        error.to_string().starts_with("missing evidence:"),
+        "{error:#}"
+    );
+    assert_eq!(
+        db::classify_failure_error(&error),
+        db::FailureClass::Permanent
+    );
+    assert_eq!(model_calls.get(), 0);
+    assert_no_rollup_generation_or_checkpoint(&conn, task_id)?;
+    let failures: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM raw_ingest_failures
+         WHERE session_id = ?1 AND insert_errors = 1",
+        [session_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(failures, 1);
+    let log = std::fs::read_to_string(data_dir.path.join("remem.log"))?;
+    assert!(
+        log.contains("[ERROR] [session-rollup] raw archive preservation failed after prompt evidence rejection"),
+        "{log}"
+    );
+    assert!(log.contains("raw archive ingest incomplete"), "{log}");
+    Ok(())
+}
