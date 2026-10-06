@@ -115,6 +115,19 @@ selects one candidate and there is supporting continuity evidence.
 
 ### SessionStart Rendering
 
+### Automatic matching guard (GH-1103)
+
+Loose title search is a lookup aid and does not authorize automatic mutation.
+An automatic upsert requires a unique candidate supported by the existing
+session, alias or normalized title contract. Broad-only labels such as
+`review` cannot select an unrelated task across sessions. Containment must
+respect normalized word boundaries and contain a meaningful shared anchor;
+`review` does not match `Preview animation`. Repeated words count once when
+measuring overlap. Ambiguous exact aliases or conservative title candidates
+abstain and create a separate workstream, preserving every existing title,
+progress, status, owner, session link and alias. The existing rename-chain
+continuity and owner/project filters remain required.
+
 SessionStart context should render canonical active workstreams only. Alias
 rows or merged duplicate rows must not appear as separate active tasks.
 

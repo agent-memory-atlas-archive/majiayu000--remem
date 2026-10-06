@@ -14,11 +14,12 @@ Tracking:
 - `src/summarize/parse.rs` parses those fields as plain strings.
 - `src/summarize/summary_job/persist.rs` converts the parsed summary into a
   `ParsedWorkStream` and calls `crate::workstream::upsert_workstream`.
-- `src/workstream/write.rs` calls `find_matching_workstream` before insert.
-- `src/workstream/matcher.rs` matches exact title first, then simple substring
-  containment among active/paused workstreams for the same owner/project.
-- `workstream_sessions` links a workstream row to a `memory_session_id`, but
-  `upsert_workstream` does not currently use that link before title matching.
+- `src/workstream/write.rs` calls `find_workstream_for_upsert` before insert.
+- `src/workstream/matcher.rs` checks unique session continuity and exact aliases
+  before title fallback. The public `find_matching_workstream` retains loose
+  containment for read-only lookup; it is not used to authorize upserts.
+- `workstream_sessions` links a workstream row to a `memory_session_id`;
+  upsert validates session identity uniqueness before continuity matching.
 - `build_existing_summary_context` can load a previously linked workstream for
   the same `memory_session_id`, proving the DB already has a continuity signal
   that is stronger than title text.
@@ -149,8 +150,15 @@ Change `upsert_workstream` to use this order:
      and continue to the next safe path.
 4. Current exact title match.
 5. Conservative fuzzy fallback:
-   - keep current containment behavior only as a final fallback;
-   - add tests proving unrelated tasks do not merge.
+   - use a separate automatic matcher with normalized word-boundary
+     containment and meaningful anchors; broad-only labels do not select
+     another session's workstream;
+   - count distinct meaningful tokens for the three-token continuity rule;
+   - collect candidates and require uniqueness rather than selecting the most
+     recently updated row; an ambiguous exact alias terminates auto matching;
+   - retain the existing scoped active/paused and canonical-row predicates;
+   - test `review` versus `Preview animation`, two review tasks, repeated-token
+     overlap, duplicate exact aliases, and the existing rename chain (GH-1103).
 6. Insert new workstream.
 
 Every successful match must record a match reason such as:
