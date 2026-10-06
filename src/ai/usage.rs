@@ -43,19 +43,32 @@ pub(super) fn record_usage(
         );
     }
     match crate::db::open_db().and_then(|conn| {
+        let details = serde_json::json!({"version": 1, "observation": &usage}).to_string();
+        let tokens = &usage.tokens;
         crate::db::record_ai_usage_observation(
             &conn,
-            ctx.project,
-            ctx.session_id,
-            operation,
-            result.executor,
-            Some(&result.model),
-            &usage,
-            outcome,
-            usage_source,
-            pricing_source,
-            cost,
-            cost_status,
+            &crate::db::AiUsageRecord {
+                project: ctx.project,
+                session_id: ctx.session_id,
+                operation,
+                executor: result.executor,
+                model: Some(&result.model),
+                input_tokens: tokens.input_tokens,
+                output_tokens: tokens.output_tokens,
+                reasoning_tokens: tokens.reasoning_tokens,
+                cache_creation_tokens: tokens.cache_creation_tokens,
+                cache_read_tokens: tokens.cache_read_tokens,
+                raw_input_tokens: tokens.raw_input_tokens,
+                raw_output_tokens: tokens.raw_output_tokens,
+                total_tokens: usage.known_total_tokens,
+                estimated_cost_usd: cost,
+                usage_source,
+                pricing_source,
+                usage_status: usage.status.as_str(),
+                attempt_outcome: outcome,
+                cost_status,
+                usage_details_json: &details,
+            },
         )?;
         Ok(())
     }) {
