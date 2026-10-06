@@ -335,6 +335,13 @@
   the immutable quarantine ledger is written.
 
 ### Changed
+- Staged `0.6.102` / `0.6.103` Rust source compatibility: exhaustive matches on
+  `JobTransitionOutcome` must handle `TerminalFailure`; AI usage aggregate and
+  latest-session spend struct literals must supply the new coverage fields.
+  Use query-returned coverage for historical rows instead of assuming complete
+  zero cost. The failure-lifecycle and pricing-config specs document migration;
+  replacement surface fingerprints remain staged and no release baseline is
+  advanced. REST usage coverage fields are additive.
 - GH-932/GH-934: one plan type instead of two. `ContextPlan` and the
   `context_bundle` planner are removed; `RetrievalPlan` now carries both the
   retrieval-source side (`channel_plans`) and the output-section side

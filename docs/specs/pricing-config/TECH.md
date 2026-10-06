@@ -119,6 +119,24 @@ CLI output labels incomplete costs and does not classify every non-text
 source as exact. `db::query::stats` delegates AI usage functions to the
 dedicated module instead of growing its system-statistics implementation.
 
+### Rust source compatibility
+
+The staged source boundary adds `coverage: AiUsageCoverage` to `AiUsageTotals`,
+`AiUsageSourceTotals`, `AiUsageBreakdown`, `DailyAiUsage`, and `WeeklyAiUsage`,
+and `ai_usage_coverage` to `LatestSessionMemorySpend`. External struct literals
+must provide these fields; exhaustive destructuring must bind them or use `..`.
+Existing field reads and the query functions remain available. Callers should
+use the coverage returned by those queries. A zero/default coverage value must
+not stand in for nonempty historical usage: old rows remain
+`legacy_unverified` with incomplete cost coverage.
+
+REST additions preserve existing fields; clients that reject unknown fields
+must accept the documented coverage fields. Missing coverage from an older
+server is unknown, rather than complete zero cost. The public-surface manifest
+stages the replacement Rust declaration fingerprints and records the exact
+superseded published identities. This is a source compatibility change awaiting
+release review, not a promotion of the published `v0.6.82` baseline.
+
 ## Verification
 
 Use synthetic JSON, in-memory SQLite, and harmless local fake subprocesses.
