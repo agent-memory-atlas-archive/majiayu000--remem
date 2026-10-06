@@ -7,6 +7,7 @@ Tracking:
 - Epic issue: #682
 - Design lineage: #358, #643
 - Conditional auto-activation: #946
+- Vector identity and scoped recall hardening: #1105
 - Related contracts: #385, #675
 
 ## Existing Implementation Facts
@@ -60,6 +61,47 @@ Tracking:
   the worker; hooks write no vectors rather than wrong vectors.
 - Provider-selection changes must carry committed eval evidence. They must not
   trigger model downloads from hooks or searches.
+
+## Vector execution amendment (2026-10-06, Refs #1105)
+
+`memory_embeddings` remains authoritative with its existing composite primary
+key; no source-data migration or model download is introduced. The v2 derived
+layout uses one vec0 table per exact `(model, dimensions)` profile. Table names
+contain a deterministic SHA-256 profile digest, while
+`memory_embedding_vec_state_v2` keys the backfill cursor and readiness by model
+and dimensions. Legacy dimension-only mirrors are never served by v2 and can
+be retired as derived data. A profile's table, writes, cursor, readiness, and
+explicit inactive-profile pruning use that same identity. A single backfill
+batch and its cursor advance commit atomically.
+
+The shared vector executor accepts caller-built, parameterized memory
+eligibility predicates. Search supplies its existing project/global, branch,
+type and lifecycle predicates; context supplies its existing owner/alias,
+branch, suppression, current-state and excluded-type predicates. The index
+applies those predicates and same-profile source membership through vec0's
+`memory_id IN (eligible-memory subquery)` constraint, before nearest-neighbor
+selection. An outer JOIN filter after `k` is not equivalent and is forbidden.
+No caller-facing arbitrary-SQL option is introduced.
+
+When the profile index is unavailable or rebuilding, the same scope executes
+against authoritative embeddings as a streaming exact cosine scan. A bounded
+top-k heap retains only nearest results; time scales with eligible embeddings,
+but older IDs are not sampled away. Database/decode failures propagate. Search
+diagnostics distinguish the exact scan from indexed execution.
+
+SessionStart and UserPromptSubmit reuse this executor while retaining their
+existing query-embedding network policy, maximum returned vector candidates,
+distance calibration, RRF weights, and post-retrieval governance. The previous
+`updated_at DESC LIMIT 4096` source-vector query is removed. This is only the
+vector portion of GH953 convergence, not graph/reranker/confidence-gate
+enablement or completion of GH934.
+
+Required regressions: same-dimensional opposing A/B vector rankings; artifact
+revision identity; old/new profile backfill and prune; missing/rebuilding
+profile readiness; competing out-of-scope neighbors above `k` with a nonempty
+in-scope result; deleted/suppressed/excluded rows; exact-vs-KNN rankings; and an
+automatic context semantic target older than 4,096 eligible newer memories.
+Tests use fabricated vectors or feature-hash in isolated temporary databases.
 
 ## Phase 1: Provider Contract
 

@@ -63,6 +63,17 @@ This is why the work is staged below rather than landed as one change.
 
 ## Future target design
 
+### Narrow vector correction under #1105
+
+The `local-semantic-embedding/` amendment makes vector execution a shared
+primitive, with parameterized caller eligibility. Injection keeps
+`push_context_memory_filters` and delegates its same-profile candidates to
+`retrieval::vector`; it no longer independently sorts source vectors by
+recency before calculating distance. This does not adopt search's other
+channels or post-fusion confidence/rerank policy and does not claim completion
+of S2-S5. Native vector regressions plus existing injection and ownership tests
+must validate the correction separately from broader engine convergence.
+
 The design in this section was not completed by the narrowed #953 slice.
 Continuing it requires a separately tracked implementation issue and fresh
 byte-equivalence and ranking evidence.

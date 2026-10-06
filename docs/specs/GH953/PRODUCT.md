@@ -43,6 +43,14 @@ and the evidence-confidence gate remain future convergence work.
 
 ## Future convergence goals
 
+The #1105 vector correctness amendment shares only the vector executor between
+search, SessionStart and prompt-time retrieval. It preserves caller-specific
+eligibility and weights while fixing profile identity, pre-KNN scope filtering,
+and the automatic path's recency cutoff. Its required regressions and derived
+index rollout live in `local-semantic-embedding/`. Channel assembly, graph
+parity, reranking, and confidence-gate convergence remain future work; #953's
+historical S1 closure and the parked research issues are unchanged.
+
 1. One engine computes candidate sets for both surfaces.
 2. One source of truth for channel weights and fusion constants.
 3. Callers express intent as a profile, not by re-implementing channel assembly.
