@@ -73,6 +73,8 @@ context that is safe to review. Explicitly analytical quotations such as
 an activity, not an instruction to perform the quoted action. Retain a small,
 complete-clause English/Chinese set as pending-review candidates when every
 cited event is a matching user-authored message or prompt, with no tool source.
+An explicit non-user role stays non-user even if its event type says
+`user_prompt_submit`. A genuine prompt hook that omits the role remains valid.
 
 This path never auto-promotes. It preserves the analytical framing and original
 source references; a reviewer may approve or reject it through the existing

@@ -478,5 +478,11 @@ fn load_session_summary(
 }
 
 fn is_user_authored_event(event: &SourceEvent) -> bool {
-    event.role.as_deref() == Some("user") || event.event_type == "user_prompt_submit"
+    match event.role.as_deref() {
+        Some("user") => true,
+        // Some native prompt hooks omit role. An explicit non-user role
+        // must never acquire user provenance from the event name instead.
+        None => event.event_type == "user_prompt_submit",
+        Some(_) => false,
+    }
 }

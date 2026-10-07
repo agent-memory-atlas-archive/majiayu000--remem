@@ -346,6 +346,11 @@ a complete supported user activity.
 
 ### Review-only security context (2026-10-07)
 
+The source batch treats an explicit role as authoritative: only `user` counts
+as user-authored. `user_prompt_submit` supplies that identity only when the role
+is absent; it cannot override an explicit assistant, tool or system role.
+This shared rule protects both research and preventive-constraint exceptions.
+
 `non_retention::research` recognizes complete user activity clauses and explicit
 analytical quotations, with separate stable keys for their topics and framing.
 It shares no prefix/substring exemption with harmful-instruction detection.

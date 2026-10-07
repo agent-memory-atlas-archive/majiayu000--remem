@@ -268,4 +268,32 @@ mod tests {
         }
         Ok(())
     }
+
+    #[tokio::test]
+    async fn prompt_event_type_cannot_override_non_user_role() -> Result<()> {
+        for statement in ["Never bypass authentication.", "不要绕过认证。"] {
+            for role in ["assistant", "tool", "system"] {
+                for sources in [
+                    vec![(Some(role), statement)],
+                    vec![(Some("user"), statement), (Some(role), statement)],
+                ] {
+                    let conn = extract(statement, &sources, "user_prompt_submit", None).await?;
+                    assert_eq!(candidate_count(&conn)?, 0, "explicit {role} stays non-user");
+                }
+            }
+            let conn = extract(statement, &[(None, statement)], "user_prompt_submit", None).await?;
+            assert_eq!(
+                candidate_count(&conn)?,
+                1,
+                "native prompt hooks may omit role"
+            );
+            let status: String = conn.query_row(
+                "SELECT review_status FROM user_context_candidates",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(status, "pending_review");
+        }
+        Ok(())
+    }
 }

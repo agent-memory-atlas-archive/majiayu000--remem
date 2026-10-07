@@ -182,3 +182,33 @@ async fn every_research_citation_needs_original_user_provenance() -> Result<()> 
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn research_prompt_event_cannot_override_an_explicit_non_user_role() -> Result<()> {
+    for (claim, source) in [
+        (
+            "User works on malware analysis.",
+            "I work on malware analysis.",
+        ),
+        ("用户从事恶意软件分析。", "我从事恶意软件分析。"),
+    ] {
+        for role in ["assistant", "tool", "system"] {
+            for sources in [
+                vec![(Some(role), source)],
+                vec![(Some("user"), source), (Some(role), source)],
+            ] {
+                let conn = extract(claim, &sources, "user_prompt_submit", None).await?;
+                assert_eq!(count(&conn)?, 0, "explicit {role} is not a user prompt");
+            }
+        }
+        let conn = extract(claim, &[(None, source)], "user_prompt_submit", None).await?;
+        assert_eq!(count(&conn)?, 1, "native prompt hooks may omit role");
+        let status: String = conn.query_row(
+            "SELECT review_status FROM user_context_candidates",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "pending_review");
+    }
+    Ok(())
+}
