@@ -213,6 +213,24 @@ pub(super) async fn run_cli(cli: Cli) -> Result<()> {
             json,
             quiet,
         } => match action {
+            Some(DoctorAction::Memory(args)) => {
+                let project = crate::log::without_file_logging(|| {
+                    args.project
+                        .unwrap_or_else(|| db::project_from_cwd(&resolve_cwd_arg(args.cwd)))
+                });
+                doctor::run_memory_diagnostic(
+                    doctor::MemoryDiagnosticOptions {
+                        project,
+                        query: args.query,
+                        host: args.host,
+                        session_id: args.session_id,
+                        source_root: args.source_root,
+                        injection_run_id: args.injection_run_id,
+                    },
+                    json,
+                    quiet,
+                )?;
+            }
             Some(DoctorAction::Truth(args)) => {
                 let project = args
                     .project

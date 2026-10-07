@@ -4,6 +4,8 @@ use clap::{Args, Subcommand};
 pub(in crate::cli) enum DoctorAction {
     /// Inspect the read-only CurrentTruth projection for one project scope.
     Truth(DoctorTruthArgs),
+    /// Trace why a phrase or source session did not become usable context.
+    Memory(DoctorMemoryArgs),
 }
 
 #[derive(Args)]
@@ -23,4 +25,26 @@ pub(in crate::cli) struct DoctorTruthArgs {
     /// Restrict to one exact memory topic key or user-claim key (`type:key` also works).
     #[arg(long)]
     pub(in crate::cli) subject: Option<String>,
+}
+
+#[derive(Args)]
+pub(in crate::cli) struct DoctorMemoryArgs {
+    /// Original phrase to discover (no match means unknown, not absent capture).
+    #[arg(required_unless_present = "session_id", conflicts_with = "session_id")]
+    pub(in crate::cli) query: Option<String>,
+    /// Exact stored project key from raw sessions. Defaults to --cwd's project.
+    #[arg(long, conflicts_with = "cwd")]
+    pub(in crate::cli) project: Option<String>,
+    #[arg(long)]
+    pub(in crate::cli) cwd: Option<String>,
+    /// Original source session ID; copy its host and source root unchanged.
+    #[arg(long, requires_all = ["host", "source_root"])]
+    pub(in crate::cli) session_id: Option<String>,
+    #[arg(long)]
+    pub(in crate::cli) host: Option<String>,
+    #[arg(long, requires = "session_id")]
+    pub(in crate::cli) source_root: Option<String>,
+    /// Inspect this exact destination context run instead of the latest recorded run.
+    #[arg(long)]
+    pub(in crate::cli) injection_run_id: Option<String>,
 }

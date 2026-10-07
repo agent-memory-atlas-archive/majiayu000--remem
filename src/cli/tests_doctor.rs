@@ -55,3 +55,34 @@ fn truth_help_describes_its_command_specific_json_schema() {
     assert!(help.contains("command-specific, versioned schemas"));
     assert!(!help.contains("fields: `version`, `status`, `fails`, `warns`, `checks[]`"));
 }
+
+#[test]
+fn memory_diagnostic_requires_phrase_or_complete_source_session() {
+    assert!(Cli::try_parse_from(["remem", "doctor", "memory"]).is_err());
+    assert!(Cli::try_parse_from(["remem", "doctor", "memory", "--session-id", "same"]).is_err());
+    assert!(Cli::try_parse_from(["remem", "doctor", "memory", "why redis", "--json"]).is_ok());
+    assert!(Cli::try_parse_from([
+        "remem",
+        "doctor",
+        "memory",
+        "--session-id",
+        "same",
+        "--host",
+        "codex-cli",
+        "--source-root",
+        "local",
+        "--project",
+        "/repo",
+        "--json"
+    ])
+    .is_ok());
+    assert!(Cli::try_parse_from([
+        "remem",
+        "doctor",
+        "memory",
+        "why redis",
+        "--session-id",
+        "same"
+    ])
+    .is_err());
+}

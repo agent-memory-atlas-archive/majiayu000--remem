@@ -536,6 +536,15 @@ pub struct RawSearchRequest {
     pub until_epoch: Option<i64>,
 }
 
+// Keep FTS first: SQLite 3.45 can otherwise scan the project index and
+// repeat MATCH for every raw row, making selective archive searches unbounded.
+const RAW_SEARCH_SELECT: &str =
+    "SELECT r.id, r.session_id, r.project, r.role, r.content, r.source, \
+                r.branch, r.cwd, r.created_at_epoch \
+         FROM raw_messages_fts f \
+         CROSS JOIN raw_messages r ON r.id = f.rowid \
+         WHERE raw_messages_fts MATCH ?1";
+
 pub fn search_raw_messages(conn: &Connection, req: &RawSearchRequest) -> Result<Vec<RawMessage>> {
     let limit = req.limit.max(1);
     let offset = req.offset.max(0);
@@ -544,13 +553,7 @@ pub fn search_raw_messages(conn: &Connection, req: &RawSearchRequest) -> Result<
         return Ok(vec![]);
     }
 
-    let mut sql = String::from(
-        "SELECT r.id, r.session_id, r.project, r.role, r.content, r.source, \
-                r.branch, r.cwd, r.created_at_epoch \
-         FROM raw_messages r \
-         JOIN raw_messages_fts f ON f.rowid = r.id \
-         WHERE raw_messages_fts MATCH ?1",
-    );
+    let mut sql = String::from(RAW_SEARCH_SELECT);
     let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query(query))];
 
     if let Some(project) = req.project.as_deref() {

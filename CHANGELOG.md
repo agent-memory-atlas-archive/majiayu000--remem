@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.104] - Unreleased
+
+- Add `doctor memory` to inspect existing capture, extraction, review, validity
+  and context-run evidence in one read-only report, with explicit unknowns and
+  preserved raw-session/commit consumer boundaries.
+
 ## Unreleased
 
 ### Added
