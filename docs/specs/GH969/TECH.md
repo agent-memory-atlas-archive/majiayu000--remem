@@ -159,7 +159,7 @@ file is referenced.
 
 | Layer | Primary roots | May depend on |
 |---|---|---|
-| Foundation/domain | Roots `atomic_file`, `build_info`, `git_util`, `identity`, `log`, `perf`, `project_alias`, `project_id`, `runtime_config` | Standard/library utilities and other foundation roots |
+| Foundation/domain | Roots `atomic_file`, `build_info`, `git_util`, `host_roots`, `identity`, `log`, `perf`, `project_alias`, `project_id`, `runtime_config` | Standard/library utilities and other foundation roots |
 | Storage | Roots `captured_git`, `db`, `git_evidence`, `git_trace`, `migrate`, `spill_queue`, plus `src/migrations/**` | Foundation/domain |
 | Memory/retrieval | Roots `graph_candidate`, `memory`, `memory_candidate`, `retrieval`, `rules`, `truth`, `user_context`, `workstream` | Foundation/domain and storage |
 | Application | Roots `ai`, `context`, `context_bundle`, `dream`, `extraction_worker`, `ingest`, `maintenance`, `observation_extract`, `retrieval_router`, `session_activity`, `session_rollup`, `summarize`, `timeline`, `worker` | Foundation/domain, storage, memory/retrieval |
@@ -539,6 +539,23 @@ guard consumes only that verdict: it checks the emitted allowed/forbidden wordin
 and verifier-bound report path/hash without re-deriving PASS or source
 equivalence. Policy prose on adjacent lines never authorizes claim wording.
 Level 3 claims still require independent authority.
+
+The security snapshot's closed-world task inventory includes v095
+`worker_dispatch_state`. The typed task binds extraction host/project IDs
+through its sole benchmark session. The deterministic production pipeline
+claims `observation_extract` once, then `memory_candidate` once only for an
+explicitly approved or poisoning-quarantine task. Its exact ledger therefore
+contains the observation group at `(ready_sequence, last_claim_sequence) =
+(0, 1)`, the optional candidate group at `(1, 2)`, and the extraction queue
+with empty host/project at `(0, 1)` or `(0, 2)`. A queued graph follow-up has
+not been claimed and must not add a dispatch row. The verifier checks the
+complete typed ledger row set against this task-derived history, including
+cardinality, scope, stage, host/project, nullability, and both sequences.
+The subsequent production replay comparison still covers every table,
+column, typed cell, and SQLite schema entry, including this ledger; no
+operational-state exemption or sequence normalization is introduced.
+Unexpected rows, scope, sequence, or hidden columns fail closed even when
+the supplied artifact hashes have been updated.
 
 ## Outcome Scorecard
 

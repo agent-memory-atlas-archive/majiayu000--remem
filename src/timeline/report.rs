@@ -46,13 +46,23 @@ fn render_recent_timeline(out: &mut String, recent: &[RecentObservation]) -> Res
 
 fn render_monthly_breakdown(out: &mut String, monthly: &[MonthRow]) -> Result<()> {
     writeln!(out, "## Monthly Breakdown")?;
-    writeln!(out, "| Month | Observations | Sessions | AI Cost |")?;
-    writeln!(out, "|-------|-------------|----------|---------|")?;
+    writeln!(
+        out,
+        "| Month | Observations | Sessions | Known AI cost | Cost-incomplete calls |"
+    )?;
+    writeln!(
+        out,
+        "|-------|-------------|----------|---------|---------|"
+    )?;
     for month in monthly {
         writeln!(
             out,
-            "| {} | {} | {} | ${:.2} |",
-            month.month, month.observations, month.sessions, month.ai_cost
+            "| {} | {} | {} | ${:.2} | {} |",
+            month.month,
+            month.observations,
+            month.sessions,
+            month.ai_cost,
+            month.ai_usage_coverage.cost_incomplete_calls
         )?;
     }
     Ok(())
@@ -126,9 +136,12 @@ pub fn generate_timeline_report(conn: &Connection, project: &str, full: bool) ->
     writeln!(out, "## Token Economics")?;
     writeln!(
         out,
-        "- Total AI cost: ${:.2}",
+        "- Known AI cost estimate: ${:.2}",
         report.token_economics.total_ai_cost
     )?;
+    writeln!(out, "- Cost coverage: {} incomplete calls, including {} unpriced; local estimates are not provider invoices",
+        report.token_economics.ai_usage_coverage.cost_incomplete_calls,
+        report.token_economics.ai_usage_coverage.unpriced_calls)?;
     let discovery_m = report.token_economics.total_discovery_tokens as f64 / 1_000_000.0;
     writeln!(out, "- Total discovery tokens: {:.1}M", discovery_m)?;
     writeln!(

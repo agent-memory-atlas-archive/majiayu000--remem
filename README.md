@@ -66,6 +66,12 @@ cargo install remem-ai --bin remem
 remem install --target codex
 ```
 
+Codex installation, detection, doctor, uninstall, transcript scanning and
+default native-memory import all honor `CODEX_HOME`; the default is
+`~/.codex`. Set it to an absolute directory before running these commands
+to select another Codex profile. Empty or relative overrides fail visibly
+before installation writes. Unrelated profile files stay untouched.
+
 GitHub Releases: prebuilt binaries for macOS and Linux on x64/arm64, with
 published checksums. Use one canonical `remem` executable on `PATH`;
 `remem doctor` warns when hooks and terminals resolve different copies.
@@ -90,6 +96,8 @@ SessionStart and queues durable session distillation at Stop. Codex also uses
 `UserPromptSubmit` to capture each prompt and surface compact optional memory
 candidates. `remem doctor` checks the schema, encryption key, database, hooks,
 MCP registration, worker, and common install-path drift.
+Its diagnostics do not create the data directory or write or rotate log files;
+findings and stderr warnings remain visible, and existing log health is inspected.
 
 Repository contributors can verify duplicate SessionStart suppression with the
 [isolated executable smoke fixture](scripts/ci/smoke_sessionstart_context_gate.sh).
@@ -174,9 +182,41 @@ Explicit search is an inspection and recovery surface, so it may return
 labeled `legacy_unverified` memories; default SessionStart and CurrentTruth
 exclude those rows and record the reason.
 
+Malformed generated extraction responses retry with the existing bounded
+backoff while keeping the same source evidence. Invalid stored evidence still
+requires repair; exhausted model attempts preserve raw capture and replay
+ranges for inspection instead of accepting incomplete output.
+
+Observation extraction and session rollup split large backlogs into bounded
+event chunks. Each model call budgets system instructions, prompt formatting,
+and evidence together; completion advances only through the processed chunk.
+Raw evidence remains available when per-event prompt content is clipped. Exact
+recovery retains the original range and resumes verified successful chunks
+under the explicitly selected profile and one overall timeout. Already-existing
+linked successors resume from their own original bounds and checkpoints; a
+completed primary task does not hide a failed successor. Archived exact recovery
+claims the existing family atomically, suppresses new follow-up work, and archives
+unfinished members again if the attempt fails.
+
+Workers persist fair queue and stage/project claim order, so continuing capture
+in a busy project leaves room for downstream extraction and durable jobs across
+once-worker restarts. The existing once-worker admission budget still applies.
+
 Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
-dropped or routed to review with a diagnosable reason.
+dropped or routed to review with a diagnosable reason. Complete, user-supported
+security prohibitions, research activities and explicitly analytical quotations
+can enter human review in English or Chinese; they never auto-promote. Secret
+values, harmful instructions and unsupported external text remain excluded.
+
+Automatically promoted summary decisions and discoveries can enter current
+context at their original summary confidence when captured local evidence,
+the current summary gate, and the exact activation receipt still validate.
+External content and missing or changed proof remain review-gated or excluded.
+New trusted evidence can reconsider identical content that is still pending
+review: remem preserves the original snapshot and links it to a fresh candidate.
+Repeated evidence, human review decisions, quarantine, and suppression are
+preserved. Expired operational state needs fresh evidence before renewal.
 
 For module ownership and current data flow, read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -358,9 +398,23 @@ The verified local model is optional; the labeled feature-hash fallback remains
 available. The second-stage local reranker is also optional and disabled until
 configured.
 
+Vector indexes keep each model and artifact revision in its own vector space.
+Project, branch, type, and lifecycle filters apply before nearest-neighbor
+selection. Automatic context uses the same vector executor as search, so old
+memories remain eligible by similarity as a project grows. While a derived
+index is rebuilding, an exact local scan preserves recall; large stores may
+take longer until that profile's index is ready.
+
 Use the [current configuration routes](docs/README.md#configuration), the
 [local embedding contract](docs/specs/local-semantic-embedding/PRODUCT.md), and
 `remem config`, `remem embedding`, or `remem reranker` help for details.
+
+`remem usage` reports every dispatched memory-AI attempt, including failures.
+Observed zero, partial, missing, invalid, and text-estimated token counts remain
+distinct. Reported USD is the known priced portion; coverage counts show when
+unknown rates or missing counter details make it incomplete. Failed attempts
+without provider counters do not receive guessed token estimates. Historical
+usage remains labeled as unverified rather than being silently reclassified.
 
 ### Share or edit memory outside the database
 

@@ -16,6 +16,7 @@ LAYER_ROOTS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "atomic_file",
             "build_info",
             "git_util",
+            "host_roots",
             "identity",
             "log",
             "perf",

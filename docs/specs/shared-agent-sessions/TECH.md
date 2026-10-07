@@ -15,6 +15,18 @@ Status: Current contract (implementation in progress)
 
 ## Verification
 
+GH-1104 adds a small shared `host_roots` resolver over
+`agent_sessions::Roots::from_env_for(Agent::Codex)`, with absolute-path
+validation. `CodexHost` captures the validated root once when hosts are
+resolved, so all paths in one install/uninstall plan use the same profile.
+Host resolution becomes fallible before runtime-store or host writes.
+Doctor uses the same resolver and emits failed configuration checks when it
+cannot resolve the selected root. Native-memory import and transcript-root
+selection reuse it without weakening source format, trust or required-root
+validation. Tests run commands in isolated child environments and compare
+both selected and default profile files before/after install and uninstall;
+empty/relative overrides fail without creating a runtime store.
+
 Existing raw archive, reconciliation, ingestion, identity and Git evidence tests exercise persistence policy. New structural assertions cover mixed content/timestamp precedence, short-capture callback order, exact CRLF/UTF-8 behavior and arbitrary-root discovery. Regression tests cover v092-to-v093 defaults/constraints, one-time reclassification with unchanged cursor, actual host/mode conflicts, batch rollback, and required overrides with an unaffected optional host. The full local preflight is the final gate; targeted tests precede it. Smoke runs use temporary HOME and REMEM_DATA_DIR. No private transcript fixtures enter Git.
 
 ## Rollback

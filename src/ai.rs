@@ -8,19 +8,24 @@ mod pricing;
 mod tests;
 mod types;
 mod usage;
+mod usage_observation;
+#[cfg(test)]
+mod usage_tests;
 
 use cli::call_cli;
 use codex_cli::call_codex_cli;
 use http::call_http;
 use pricing::estimate_tokens;
-use usage::record_usage;
+use usage::UsageAttemptGuard;
 
 tokio::task_local! {
     static RESOLVED_PROFILE_OVERRIDE: crate::runtime_config::ResolvedMemoryAiProfile;
 }
 
+#[cfg(test)]
 pub(crate) use types::TokenUsage;
 pub use types::UsageContext;
+pub(crate) use usage_observation::{UsageObservation, UsageStatus};
 
 /// AI call with timeout. Executor/model/path are resolved from remem config.
 pub async fn call_ai(
@@ -37,6 +42,7 @@ pub async fn call_ai(
             },
         )?,
     };
+    let mut attempt = UsageAttemptGuard::new(ctx, &profile);
     let result = match profile.executor {
         crate::runtime_config::MemoryAiExecutor::Http => {
             call_http(system, user_message, &profile).await
@@ -45,14 +51,26 @@ pub async fn call_ai(
             call_cli(system, user_message, &profile).await
         }
         crate::runtime_config::MemoryAiExecutor::CodexCli => {
-            call_codex_cli(system, user_message, &profile).await
+            call_codex_cli(system, user_message, &profile, &attempt).await
         }
-    }?;
+    };
 
     let input_tokens = estimate_tokens(system) + estimate_tokens(user_message);
-    let output_tokens = estimate_tokens(&result.text);
-    record_usage(ctx, &result, input_tokens, output_tokens);
-    Ok(result.text)
+    match result {
+        Ok(result) => {
+            let output_tokens = estimate_tokens(&result.text);
+            attempt.complete(&result, "success", input_tokens, output_tokens);
+            Ok(result.text)
+        }
+        Err(error) => {
+            if let Some(failure) = error.downcast_ref::<types::AiCallFailure>() {
+                attempt.complete(&failure.evidence, "failed", 0, 0);
+            } else {
+                attempt.complete(&attempt.snapshot(), "failed", 0, 0);
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn with_resolved_profile<T>(

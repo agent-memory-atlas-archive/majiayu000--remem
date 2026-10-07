@@ -194,6 +194,8 @@ fn status_report_fixture() -> StatusReport {
             ai_calls: 2,
             ai_total_tokens: 1_234,
             ai_estimated_cost_usd: 0.0123,
+            ai_cost_complete: true,
+            ai_usage_coverage: crate::db::AiUsageCoverage::default(),
             ai_unattributed_legacy_calls: 1,
         }),
         today: DailyStatus {

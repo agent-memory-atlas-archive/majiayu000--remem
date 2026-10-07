@@ -91,14 +91,15 @@ pub(super) fn query_token_economics(conn: &Connection, project: &str) -> Result<
     let mut p: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let (pf, _) = push_project_filter("project", project, 1, &mut p);
     let refs = to_sql_refs(&p);
-    let total_ai_cost: f64 = conn
+    let coverage = crate::db::query::ai_usage_coverage_select(conn)?;
+    let (total_ai_cost, ai_usage_coverage) = conn
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM ai_usage_events WHERE {}",
+                "SELECT COALESCE(SUM(estimated_cost_usd), 0.0), {coverage} FROM ai_usage_events WHERE {}",
                 pf
             ),
             refs.as_slice(),
-            |row| row.get(0),
+            |row| Ok((row.get::<_, f64>(0)?, crate::db::query::ai_usage_coverage_from_row(row, 1)?)),
         )
         .map_err(|error| {
             anyhow::anyhow!("timeline token-economics AI-cost query failed: {error}")
@@ -138,6 +139,7 @@ pub(super) fn query_token_economics(conn: &Connection, project: &str) -> Result<
 
     Ok(TokenEcon {
         total_ai_cost,
+        ai_usage_coverage,
         total_discovery_tokens,
         sessions_with_context,
     })

@@ -48,6 +48,92 @@ surface that #381/#383 evidence collection depends on.
 - No automatic row deletion; purging archived rows is an explicit
   `remem cleanup` action, consistent with invalidate-never-delete.
 
+### Generated Output Validation (Refs #1105)
+
+A provider can successfully return text that fails the extraction output
+contract. This is a recoverable model-generation failure, not proof that the
+stored source evidence is malformed. Observation, session-rollup, memory,
+user-context, and graph candidate output validation uses the existing bounded
+transient retry budget. A successful retry must consume the original evidence
+range; an unsuccessful retry must not advance its cursor before exhaustion.
+
+Malformed stored evidence, unsupported source/schema versions, and missing
+evidence keep their permanent-failure behavior. Output retries do not relax
+strict parsing, evidence binding, poisoning checks, or promotion policy.
+Exhausted generated-output failures still retain raw evidence and replay ranges;
+exact archived/quarantined replay keeps its single-attempt, explicit-profile
+governance and never becomes ordinary daemon work after failure.
+
+Acceptance includes a malformed generated response followed by a valid response,
+bounded repeated malformed responses with preserved replay evidence, and a
+malformed source row that remains permanently failed without an AI retry.
+
+### Bounded captured-event extraction (Refs #1105)
+
+Observation extraction and session rollup process a contiguous prefix of their
+pending evidence, with at most 64 captured events and a 256 KiB combined prompt
+budget per model call. The budget includes the system instruction, serialized
+user prompt, and a reserved provider wrapper. A backlog is split into successive
+calls without declaring unseen events covered. Existing 24 KiB per-event content
+clipping remains explicit in the prompt and diagnostics; raw evidence is retained
+for inspection and replay. An input that cannot fit even one event fails visibly
+before a provider call.
+
+Successful chunks advance only after required persistence and follow-up effects
+have completed. Failures, exhaustion, and newly recorded replay ranges refer only
+to the attempted chunk. Later events remain processable. A replay range retains
+its original endpoints as audit evidence; a failed replay cannot skip its failed
+chunk and later report the parent range as replayed.
+
+An exact archived replay may process several chunks and already-existing linked
+successors of the same range, under one explicit profile and one 420-second total
+timeout. Admission validates and claims the whole existing family atomically;
+an unrelated scope, range, or owner leaves the original archive unchanged. Each
+member resumes only its own durable successful checkpoint and immutable original
+lower bound. A completed primary task is not proof that its successors succeeded.
+Historical cursors are not treated as proof of success, and an unverifiable
+historical lower bound rejects recovery instead of widening the source range.
+Any unsuccessful exact attempt preserves each member's verified progress and
+returns unfinished owned work and the range to archived quarantine. Artifact writes
+retain their existing at-least-once, idempotent recovery behavior: a crash before
+the final success checkpoint may repeat a chunk, and must not skip its effects.
+
+A pending graph successor waiting for this same replay family's failed memory
+extraction must not prevent recovery of its own prerequisite forever. Recovery
+may retain or claim that strictly validated, unleased successor together with
+the failed prerequisite. Ordinary recovery preserves its waiting backoff; exact
+recovery waits until every admitted member is retry-ready. Other active work
+still blocks admission, and quarantine does not acquire pending tasks. Repeating
+a bounded follow-up enqueue also respects that existing task's own progress and
+archive, even when the producer itself is an ordinary task.
+
+### Worker liveness (Refs #1105)
+
+A recent heartbeat is healthy only while the operating system confirms its
+process is alive, including on Windows. A once worker that has exited must not
+suppress a later Stop-hook launch for the heartbeat freshness window. Normal
+return, task error, and cancellation/unwind deactivate only that worker's own
+heartbeat while preserving its last diagnostic time. An unexpected process
+kill continues to use OS liveness and the existing expired-lease recovery.
+
+### Fair worker progress (Refs #1105)
+
+Ready extraction and durable-job queues take turns according to persisted claim
+history. Within each queue, ready stage/host/project groups that have waited
+longest for service run first. Priority and age decide equally served groups,
+preserving low-latency first dispatch. Continuing capture in one project cannot
+keep later extraction stages or other projects from receiving work; restarting
+a once worker does not reset fairness. A group without eligible work consumes no
+turn, including a future retry or a rule-compilation successor blocked by its
+active predecessor.
+
+The once-worker four-item / 180-second admission budget, early local cleanup,
+idle-only historical drain and retrieval enrichment, exact-replay isolation,
+and per-task retry/timeout rules remain in force. Fairness orders claims, not
+wall-clock runtimes; a task already inside a provider call keeps its existing
+timeout. Failure diagnostics identify an actual scheduled retry, an exhausted
+chunk with later evidence pending, or terminal failure from persisted state.
+
 ## User-Visible Behavior
 
 - `remem status` / `remem doctor` split failure reporting into
@@ -176,10 +262,13 @@ surface that #381/#383 evidence collection depends on.
   as read-only dry-run validation. Neither acknowledgement widens active-task,
   terminal, or batch eligibility. An exact replay worker validates the profile
   and acquires the worker singleton before any write, then revalidates,
-  requeues, and claims only that target in one transaction. It processes only
-  the claimed task. Any non-successful exact attempt, including expired exact
-  worker ownership after interruption, returns the task and range to archived
-  quarantine rather than exposing default-profile work to a daemon.
+  requeues, and claims that range's existing task family in one transaction.
+  It processes only those validated members and suppresses new follow-up tasks.
+  Any non-successful exact attempt, including expired exact worker ownership
+  after interruption, archives unfinished owned members and quarantines the
+  range without exposing default-profile work to a daemon. A successful member
+  remains checkpointed when a later member fails; subsequent explicit recovery
+  resumes the remaining work without repeating its completed prefix.
 - Doctor on a store with 1000 ordinary archived-history rows + 2 fresh failures
   reports the 2 actionable failures prominently, archived count secondary, and
   exits with the severity driven by the 2. Archived legacy rows that require

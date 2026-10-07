@@ -10,8 +10,14 @@ use super::types::{Check, Status};
 const CHECK_NAME: &str = "Codex native memories";
 
 pub(super) fn check_codex_native_memories() -> Check {
-    let source_dir = crate::install::codex_memories_dir();
-    check_codex_native_memories_for(&source_dir)
+    match crate::install::codex_memories_dir() {
+        Ok(source_dir) => check_codex_native_memories_for(&source_dir),
+        Err(error) => Check::new(
+            CHECK_NAME,
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        ),
+    }
 }
 
 fn check_codex_native_memories_for(source_dir: &Path) -> Check {

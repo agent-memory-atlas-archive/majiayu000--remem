@@ -1,7 +1,7 @@
 # Pricing Config Product Spec
 
 Status: Current contract
-Date: 2026-08-18
+Date: 2026-10-06
 
 ## Problem
 
@@ -43,6 +43,44 @@ not. Set a global override with
 `remem config set pricing.input_per_mtok 1.25` and
 `remem config set pricing.output_per_mtok 6.5`.
 
+### Usage evidence and cost coverage (GH-1102, GH-1105)
+
+Each dispatched Memory AI attempt has an independent outcome and usage
+record. A failed process, missing final-output file, or empty response does
+not erase usage already received from that attempt. The original failure
+still reaches the caller; a retry is another attempt, not a duplicate to
+deduplicate. A failed attempt with no counters records missing usage and
+does not estimate paid tokens from prompt length.
+Cancellation by an outer timeout also preserves counters already received.
+
+Provider/log usage distinguishes complete, partial, missing, and invalid
+counters. An explicitly reported zero remains an observation. Missing or
+null counters remain unavailable; strings, negative counts, inconsistent
+subtotals, and arithmetic overflow are invalid. Valid counters from an
+incomplete event remain available, including raw totals and cache/reasoning
+breakdowns. The successful Claude text-only adapter retains its separately
+labeled prompt/output length estimate.
+Contradictory subtotals remain available for diagnosis but cannot inflate a
+valid reported gross token total.
+
+Cost coverage is independent from counter completeness. For example, Codex
+may report raw output without a reasoning split. Equal output/reasoning
+rates can price that raw total; different configured rates cannot. Only
+the priceable portion contributes to the existing USD field. Unknown or
+invalid pricing preserves the usage row and reports unavailable pricing.
+The automatic Codex model placeholder is unpriced unless an operator sets
+an explicit global override; it does not identify the model Codex selected.
+
+Usage summaries, daily/weekly and source groups, API stats, latest-session
+status, and timeline reports present the known priced portion alongside
+coverage counts. They must not present an unpriced or partly priced attempt
+as a complete zero-dollar estimate. Text-length estimates retain their
+calculated amount but always have incomplete cost coverage, including when
+combined with observed usage; they do not establish provider counters.
+These are local estimates, not provider invoices. Historical rows retain
+their counters and costs with unverified
+completeness; old provenance labels cannot reconstruct absent evidence.
+
 ## Done when
 
 - Fresh config text contains an empty `[pricing]` table and no default rates.
@@ -52,3 +90,8 @@ not. Set a global override with
   closed.
 - Family `[pricing.haiku]` overlays only that family after env is unset.
 - Doctor fails when `[pricing]` is invalid.
+- A synthetic failed attempt reporting 140 tokens followed by a successful
+  140-token attempt records two attempts and 280 reported tokens.
+- Zero, missing, partial, invalid, and text-estimated usage remain distinct.
+- An unknown-price event, including one mixed with known cost, makes every
+  aggregate's incomplete coverage visible without changing compiled rates.

@@ -1,11 +1,34 @@
 # Candidate Auto-Promotion Product Contract
 
 Status: Current contract
-Date: 2026-08-03
+
+Date: 2026-08-03; evidence reassessment amendment: 2026-10-06
 
 Tracking:
 - Implementation issue: #955
 - Parent quality epic: #942
+- Audit remediation: #1105
+
+## New evidence for pending content (GH-1105)
+
+For ordinary non-preference candidates, identical content with newly observed
+trusted captured evidence may re-enter the existing governance pipeline while
+the prior candidate is still untouched `pending_review`. Replaying the same
+event set, reordering that set, or supplying only already-seen/weaker evidence
+does not create another candidate or upgrade confidence.
+
+Reassessment creates a new candidate with the new source snapshot. The previous
+pending candidate keeps its original payload, evidence, confidence, and creation
+time, and receives an explicit system disposition linking it to its replacement.
+The replacement and that disposition commit atomically. Human rejection/edit/
+approval, quarantine or acknowledgement, active identities, and active
+suppression are never cleared or bypassed. Existing preference reinforcement and
+external-import identity policies remain separate.
+
+The existing operational-state renewal path remains available for untouched
+automatic promotions whose TTL expired, or legacy operational rows missing TTL.
+Renewal requires new trusted captured evidence; replaying the old event set does
+not refresh its lifetime. Human decisions and suppression still veto renewal.
 
 ## Problem
 

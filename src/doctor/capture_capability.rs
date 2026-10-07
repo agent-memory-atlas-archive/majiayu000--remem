@@ -1,21 +1,20 @@
-use std::path::PathBuf;
-
 use super::types::{Check, Status};
 
 pub(super) fn check_capture_capabilities() -> Vec<Check> {
-    check_capture_capabilities_for(&active_capture_hosts())
-}
-
-fn active_capture_hosts() -> Vec<&'static str> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let mut hosts = Vec::new();
-    if home.join(".claude").exists() || home.join(".claude.json").exists() {
-        hosts.push("claude");
+    let (hosts, codex_error) = super::environment::active_host_names();
+    let mut checks = if hosts.is_empty() && codex_error.is_some() {
+        Vec::new()
+    } else {
+        check_capture_capabilities_for(&hosts)
+    };
+    if let Some(error) = codex_error {
+        checks.push(Check::new(
+            "Capture capability (codex)",
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        ));
     }
-    if home.join(".codex").exists() {
-        hosts.push("codex");
-    }
-    hosts
+    checks
 }
 
 fn check_capture_capabilities_for(hosts: &[&'static str]) -> Vec<Check> {

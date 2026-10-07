@@ -8,6 +8,7 @@ Tracking:
 - Design lineage: #358 (closed, provider config contract in comments), #643
   (closed, long-term semantic-model follow-up)
 - Conditional auto-activation: #946
+- Vector identity and scoped recall hardening: #1105
 - Related contracts: #385 (coding-agent A/B), #675 (capacity eval axis)
 
 ## Problem
@@ -45,10 +46,57 @@ positioning.
 - Existing vectors remain valid: cosine comparison happens only within one
   model id, and switching providers offers an explicit backfill.
 
+## Vector correctness amendment (2026-10-06, Refs #1105)
+
+The derived vector index must preserve the source table's complete embedding
+profile: exact model id (including artifact digest) plus dimensions. Equal
+dimensions do not make two model spaces interchangeable. Single writes,
+batched backfill, readiness, and pruning must preserve concurrent profiles.
+
+Nearest-neighbor selection must run inside the caller's eligible scope. A
+different project, branch, excluded memory type, lifecycle state, or embedding
+profile must not consume the requested nearest-neighbor slots. Explicit search
+and automatic context keep their existing eligibility policies; this amendment
+does not widen either surface's trust or ownership boundary.
+
+SessionStart and prompt-time retrieval share the corrected vector execution
+path. Old memories remain candidates based on similarity; being older than the
+most recent 4,096 memories is not an exclusion criterion. A missing or rebuilding
+derived index uses an exact, streaming same-profile scan with bounded result
+storage, so index readiness does not change which memories are reachable.
+
+Acceptance uses offline synthetic native sqlite-vec fixtures for same-dimension
+model coexistence and switching, batch backfill, profile readiness/pruning,
+scope competition exceeding the candidate limit, and automatic retrieval of a
+semantic match older than 4,096 newer rows. No model/default/weight changes or
+live host/API runs are required. This bounded correction does not complete the
+parked retrieval-router or broader shared-engine work.
+
+## Backfill source consistency (2026-10-06)
+
+Background embedding work must not replace a newer foreground vector with a
+vector generated from an older memory or enrichment snapshot. A completed model
+call is eligible to commit only while the exact source passage is still current
+and the memory remains in a searchable lifecycle state. Changed, deleted, and
+quarantined sources discard that result; a changed source without a current
+vector remains pending for a later bounded batch.
+
+Pending work and coverage compare the stored vector's versioned input hash with
+the current canonical passage and effective enrichment. Equal or newer wall-clock
+timestamps do not establish consistency. Existing incorrect or unknown hashes
+are repaired through the existing explicit backfill limits, with no model calls
+or source rewrites during status inspection or schema migration.
+
+Acceptance includes a two-connection SQLite barrier that orders old selection,
+foreground memory/vector update, then old-result commit; same-second changes;
+enrichment changes; deletion/quarantine; and legacy mismatches repaired in bounded
+batches. Skipped work consumes the selected-work budget and must not prevent a
+later batch from advancing past deleted or quarantined candidates.
+
 ## Non-Goals
 
-- No ANN index in the first cycle. Brute-force cosine over candidate
-  embeddings stays until scale evidence demands more.
+- No approximate ANN index. The shipped sqlite-vec exact index and portable
+  exact cosine scan retain same-profile, scoped nearest-neighbor semantics.
 - No removal of the feature-hash embedder. It remains the labeled
   zero-download fallback.
 - No bundling of model weights into the release binary.

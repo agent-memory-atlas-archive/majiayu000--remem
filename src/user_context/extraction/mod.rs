@@ -13,8 +13,10 @@ use super::claims::{DEFAULT_OWNER_KEY, DEFAULT_OWNER_SCOPE};
 mod parse;
 #[cfg(test)]
 mod policy_tests;
+mod preventive_constraints;
 mod promotion_gate;
 mod prompt;
+mod research_context;
 #[cfg(test)]
 mod review_feedback_tests;
 mod source;
@@ -130,7 +132,9 @@ where
     };
     let prompt = prompt::build_candidate_prompt(task, &batch)?;
     let response = generate(prompt).await?;
-    let parsed = match parse_user_context_candidate_response(&response)? {
+    let parsed = match parse_user_context_candidate_response(&response)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?
+    {
         UserContextCandidateResponse::NoCandidates => {
             return Ok(UserContextCandidateExtractResult::NoCandidates {
                 to_event_id: batch.to_event_id,
@@ -138,7 +142,8 @@ where
         }
         UserContextCandidateResponse::Candidates(candidates) => candidates,
     };
-    validate_candidate_sources(&batch, &parsed)?;
+    validate_candidate_sources(&batch, &parsed)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?;
     let summary = persist_candidates(conn, task, &batch, &parsed, policy)?;
     crate::log::info(
         "user-context-candidate",
@@ -178,9 +183,6 @@ fn persist_candidates(
     let mut summary = PersistSummary::default();
     for candidate in parsed {
         let source_evidence = source::source_evidence_text(batch, candidate);
-        let source_preview = source_evidence
-            .as_deref()
-            .map(|preview| crate::db::truncate_str(preview, 500).to_string());
         if let Some(reason) =
             non_retention_block_reason(candidate, batch, source_evidence.as_deref())
         {
@@ -191,6 +193,19 @@ fn persist_candidates(
             );
             continue;
         }
+        // Validate the complete original evidence and authorship before compacting
+        // a review-only security clause so the preview limit cannot cut its meaning.
+        let source_preview = source_evidence.as_deref().map(|preview| {
+            let preview =
+                if crate::user_context::non_retention::security_review_key(&candidate.claim_text)
+                    .is_some()
+                {
+                    preview.split_whitespace().collect::<Vec<_>>().join(" ")
+                } else {
+                    preview.to_string()
+                };
+            crate::db::truncate_str(&preview, 500).to_string()
+        });
         let source_refs_json = source::source_refs_json(batch, candidate)?;
         if candidate_exists(conn, candidate, &source_refs_json)? {
             continue;
@@ -239,8 +254,12 @@ fn non_retention_block_reason(
         source_preview,
         &candidate.source_kind,
     )
+    .or_else(|| preventive_constraints::block_reason(candidate, batch))
+    .or_else(|| research_context::block_reason(candidate, batch))
     .or_else(|| {
         (requires_third_party_framing(candidate)
+            && !preventive_constraints::is_supported(candidate, batch)
+            && !research_context::is_supported(candidate, batch)
             && !is_supported_third_party_candidate(candidate, batch))
         .then_some("unframed_third_party_detail")
     })
@@ -496,6 +515,8 @@ fn is_supported_for_candidate_queue(
     }
     is_supported_by_user_source_event(candidate, batch)
         || is_supported_negative_user_constraint(candidate, batch)
+        || preventive_constraints::is_supported(candidate, batch)
+        || research_context::is_supported(candidate, batch)
 }
 
 fn has_behavior_source_evidence(

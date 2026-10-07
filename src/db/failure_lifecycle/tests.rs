@@ -1,3 +1,5 @@
+mod generated_output;
+
 use super::maintenance::{
     recover_due_job_candidate, requeue_due_jobs, set_job_recovery_test_seam, JobRecoveryOutcome,
     JobRecoveryTestSeam,
@@ -39,7 +41,6 @@ fn classifier_treats_sqlite_schema_locks_as_transient() {
         FailureClass::Transient
     );
 }
-
 fn setup_conn() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;

@@ -1,3 +1,5 @@
+use std::ops::AsyncFnMut;
+
 use anyhow::Result;
 use tokio::time::Duration;
 
@@ -9,6 +11,11 @@ tokio::task_local! {
 }
 
 const DEPENDENCY_WAIT_RETRY_SECS: i64 = 300;
+
+mod diagnostics;
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ExtractionTaskOutcome {
@@ -25,7 +32,7 @@ pub(crate) async fn run_next(
     timeout_secs: u64,
 ) -> Result<bool> {
     let mut conn = db::open_db()?;
-    let Some(task) = db::claim_next_extraction_task(&mut conn, lease_owner, lease_secs)? else {
+    let Some(mut task) = db::claim_next_extraction_task(&mut conn, lease_owner, lease_secs)? else {
         return Ok(false);
     };
 
@@ -43,7 +50,7 @@ pub(crate) async fn run_next(
 
     let timed = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        process_extraction_task(&task),
+        process_extraction_task(&mut task),
     )
     .await;
     let conn = db::open_db()?;
@@ -53,22 +60,14 @@ pub(crate) async fn run_next(
                 &conn,
                 task.id,
                 lease_owner,
-                to_event_id.or(task.high_watermark_event_id),
+                completed_boundary(&task, to_event_id)?,
             )?;
             crate::log::info("worker", &format!("done extraction id={}", task.id));
         }
         Ok(Ok(ExtractionTaskOutcome::Deferred(msg))) => {
             let backoff = retry_backoff_secs(task.attempts);
             db::defer_claimed_extraction_task(&conn, &task, lease_owner, &msg, backoff)?;
-            crate::log::warn(
-                "worker",
-                &format!(
-                    "extraction id={} deferred: {} (retry in {}s)",
-                    task.id,
-                    crate::db::truncate_str(&msg, 300),
-                    backoff
-                ),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
         Ok(Ok(ExtractionTaskOutcome::Waiting(msg))) => {
             db::wait_extraction_task(
@@ -91,22 +90,14 @@ pub(crate) async fn run_next(
         Ok(Err(e)) => {
             let msg = e.to_string();
             let backoff = retry_backoff_secs(task.attempts);
-            db::mark_claimed_extraction_task_failed_or_retry(
+            db::mark_claimed_extraction_task_error_or_retry(
                 &conn,
                 &task,
                 lease_owner,
-                &msg,
+                &e,
                 backoff,
             )?;
-            crate::log::warn(
-                "worker",
-                &format!(
-                    "extraction id={} failed: {} (retry in {}s)",
-                    task.id,
-                    crate::db::truncate_str(&msg, 300),
-                    backoff
-                ),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
         Err(_) => {
             let msg = format!("extraction task timed out after {}s", timeout_secs);
@@ -118,10 +109,7 @@ pub(crate) async fn run_next(
                 &msg,
                 backoff,
             )?;
-            crate::log::warn(
-                "worker",
-                &format!("extraction id={} timeout (retry in {}s)", task.id, backoff),
-            );
+            diagnostics::log_failure_transition(&conn, task.id, &msg)?;
         }
     }
 
@@ -129,70 +117,95 @@ pub(crate) async fn run_next(
 }
 
 pub(crate) async fn run_claimed_exact(
-    mut task: db::ExtractionTask,
+    task: db::ExtractionTask,
     profile: &crate::runtime_config::ResolvedMemoryAiProfile,
     lease_owner: &str,
     timeout_secs: u64,
 ) -> Result<()> {
-    task.ai_profile = Some(profile.profile_name.clone());
+    let conn = db::open_db()?;
+    let mut tasks = match db::load_claimed_exact_replay_family(&conn, task.id, lease_owner) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            return archive_exact_outcome_with_class(
+                &task,
+                lease_owner,
+                &format!("exact replay family validation failed: {error}"),
+                db::classify_failure_error(&error),
+            )
+        }
+    };
+    drop(conn);
+    for member in &mut tasks {
+        member.ai_profile = Some(profile.profile_name.clone());
+    }
     crate::log::info(
         "worker",
         &format!(
-            "claimed exact extraction id={} range_id={} kind={} project={} profile={}",
+            "claimed exact extraction id={} range_id={} kind={} project={} profile={} members={}",
             task.id,
             task.replay_range_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "<none>".to_string()),
             task.task_kind.as_str(),
             task.project,
-            profile.profile_name
+            profile.profile_name,
+            tasks.len()
         ),
     );
 
+    let mut active = 0;
     let process = crate::ai::with_resolved_profile(
         profile.clone(),
-        EXACT_REPLAY_TASK.scope((), process_extraction_task(&task)),
+        EXACT_REPLAY_TASK.scope(
+            (),
+            process_exact_family_with(
+                &mut tasks,
+                &mut active,
+                process_extraction_task,
+                |task, end| {
+                    db::checkpoint_claimed_extraction_task_chunk(
+                        &db::open_db()?,
+                        task,
+                        lease_owner,
+                        end,
+                    )
+                },
+                || db::finish_claimed_exact_replay_family(&db::open_db()?, task.id, lease_owner),
+            ),
+        ),
     );
     let timed = tokio::time::timeout(Duration::from_secs(timeout_secs), process).await;
     match timed {
-        Ok(Ok(ExtractionTaskOutcome::Done { to_event_id })) => {
-            let completed = to_event_id.or(task.high_watermark_event_id);
-            if task
-                .high_watermark_event_id
-                .is_some_and(|high_watermark| completed != Some(high_watermark))
-            {
-                return archive_exact_outcome(
-                    &task,
-                    lease_owner,
-                    "exact replay processed only part of the bounded event range",
-                );
-            }
-            let conn = db::open_db()?;
-            db::mark_extraction_task_done(&conn, task.id, lease_owner, completed)?;
+        Ok(Ok(ExtractionTaskOutcome::Done { .. })) => {
             crate::log::info(
                 "worker",
                 &format!(
-                    "done exact extraction id={} profile={}",
-                    task.id, profile.profile_name
+                    "done exact extraction family id={} profile={} members={}",
+                    task.id,
+                    profile.profile_name,
+                    tasks.len()
                 ),
             );
             Ok(())
         }
         Ok(Ok(ExtractionTaskOutcome::Deferred(reason))) => archive_exact_outcome(
-            &task,
+            &tasks[active],
             lease_owner,
             &format!("exact replay deferred: {reason}"),
         ),
         Ok(Ok(ExtractionTaskOutcome::Waiting(reason))) => archive_exact_outcome(
-            &task,
+            &tasks[active],
             lease_owner,
             &format!("exact replay waiting: {reason}"),
         ),
-        Ok(Err(error)) => {
-            archive_exact_outcome(&task, lease_owner, &format!("exact replay failed: {error}"))
-        }
+        Ok(Err(error)) => archive_exact_outcome_with_class(
+            &tasks[active],
+            lease_owner,
+            &format!("exact replay failed: {error}"),
+            db::classify_failure_error(&error),
+        ),
         Err(_) => archive_exact_outcome(
-            &task,
+            &tasks[active],
             lease_owner,
             &format!("exact replay timed out after {timeout_secs}s"),
         ),
@@ -204,8 +217,38 @@ pub(crate) fn exact_replay_task_active() -> bool {
 }
 
 fn archive_exact_outcome(task: &db::ExtractionTask, lease_owner: &str, error: &str) -> Result<()> {
+    archive_exact_outcome_with_class(task, lease_owner, error, db::classify_failure(error))
+}
+
+fn archive_exact_outcome_with_class(
+    task: &db::ExtractionTask,
+    lease_owner: &str,
+    error: &str,
+    failure_class: db::FailureClass,
+) -> Result<()> {
     let conn = db::open_db()?;
-    db::archive_claimed_exact_replay_task(&conn, task.id, lease_owner, error)?;
+    let error =
+        if task.cursor_event_id.is_some() && task.cursor_event_id == task.high_watermark_event_id {
+            format!(
+                "task={} checkpointed_through={}; family completion failed: {error}",
+                task.id,
+                task.cursor_event_id.unwrap_or(0)
+            )
+        } else {
+            format!(
+                "attempted_task={} attempted_events={}..{}: {error}",
+                task.id,
+                task.cursor_event_id.unwrap_or(0) + 1,
+                task.high_watermark_event_id.unwrap_or(0)
+            )
+        };
+    db::archive_claimed_exact_replay_task_with_class(
+        &conn,
+        task.id,
+        lease_owner,
+        &error,
+        failure_class,
+    )?;
     crate::log::error(
         "worker",
         &format!(
@@ -214,13 +257,13 @@ fn archive_exact_outcome(task: &db::ExtractionTask, lease_owner: &str, error: &s
             task.replay_range_id
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "<none>".to_string()),
-            crate::db::truncate_str(error, 300)
+            crate::db::truncate_str(&error, 300)
         ),
     );
     anyhow::bail!("{error}")
 }
 
-async fn process_extraction_task(task: &db::ExtractionTask) -> Result<ExtractionTaskOutcome> {
+async fn process_extraction_task(task: &mut db::ExtractionTask) -> Result<ExtractionTaskOutcome> {
     match task.task_kind {
         db::ExtractionTaskKind::CapturedGitLink => {
             let mut conn = db::open_db()?;
@@ -251,6 +294,80 @@ async fn process_extraction_task(task: &db::ExtractionTask) -> Result<Extraction
             "extraction task kind '{}' is not implemented",
             task.task_kind.as_str()
         ))),
+    }
+}
+
+fn completed_boundary(task: &db::ExtractionTask, completed: Option<i64>) -> Result<Option<i64>> {
+    let completed = completed.or(task.high_watermark_event_id);
+    anyhow::ensure!(
+        completed.is_none_or(
+            |end| task.high_watermark_event_id.is_some_and(|high| end <= high)
+                && end >= task.cursor_event_id.unwrap_or(0)
+        ),
+        "extraction completion exceeds its attempted evidence range"
+    );
+    Ok(completed)
+}
+
+async fn process_exact_family_with(
+    tasks: &mut [db::ExtractionTask],
+    active: &mut usize,
+    mut process: impl AsyncFnMut(&mut db::ExtractionTask) -> Result<ExtractionTaskOutcome>,
+    mut checkpoint: impl FnMut(&db::ExtractionTask, i64) -> Result<()>,
+    mut finish: impl FnMut() -> Result<()>,
+) -> Result<ExtractionTaskOutcome> {
+    for (index, task) in tasks.iter_mut().enumerate() {
+        *active = index;
+        let outcome = process_exact_chunks_with(task, &mut process, &mut checkpoint).await?;
+        let ExtractionTaskOutcome::Done { to_event_id } = outcome else {
+            return Ok(outcome);
+        };
+        let end = completed_boundary(task, to_event_id)?
+            .ok_or_else(|| anyhow::anyhow!("exact replay member has no evidence target"))?;
+        if task.cursor_event_id != Some(end) {
+            checkpoint(task, end)?;
+            task.cursor_event_id = Some(end);
+            task.attempts = 0;
+        }
+    }
+    finish()?;
+    Ok(ExtractionTaskOutcome::Done { to_event_id: None })
+}
+
+// One future covers the entire exact attempt. Its caller owns the sole timeout,
+// profile and lease; each committed checkpoint lets explicit recovery resume.
+async fn process_exact_chunks_with(
+    task: &mut db::ExtractionTask,
+    mut process: impl AsyncFnMut(&mut db::ExtractionTask) -> Result<ExtractionTaskOutcome>,
+    mut checkpoint: impl FnMut(&db::ExtractionTask, i64) -> Result<()>,
+) -> Result<ExtractionTaskOutcome> {
+    let target = task.high_watermark_event_id;
+    loop {
+        task.high_watermark_event_id = target;
+        if target.is_some_and(|high| task.cursor_event_id == Some(high)) {
+            return Ok(ExtractionTaskOutcome::Done {
+                to_event_id: target,
+            });
+        }
+        let outcome = process(task).await?;
+        let ExtractionTaskOutcome::Done { to_event_id } = outcome else {
+            return Ok(outcome);
+        };
+        let completed = completed_boundary(task, to_event_id)?;
+        if completed == target {
+            return Ok(ExtractionTaskOutcome::Done {
+                to_event_id: completed,
+            });
+        }
+        let end =
+            completed.ok_or_else(|| anyhow::anyhow!("exact replay made no evidence progress"))?;
+        anyhow::ensure!(
+            end > task.cursor_event_id.unwrap_or(0),
+            "exact replay made no evidence progress"
+        );
+        checkpoint(task, end)?;
+        task.cursor_event_id = Some(end);
+        task.attempts = 0;
     }
 }
 

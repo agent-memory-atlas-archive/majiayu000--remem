@@ -651,5 +651,7 @@ pub(super) struct StatsResponse {
     pub ai_calls: i64,
     pub ai_cost_usd: f64,
     pub ai_total_tokens: i64,
+    pub ai_cost_complete: bool,
+    pub ai_usage_coverage: crate::db::AiUsageCoverage,
     pub type_distribution: Vec<TypeCount>,
 }

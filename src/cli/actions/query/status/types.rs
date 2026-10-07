@@ -240,6 +240,8 @@ pub(super) struct LatestSessionMemorySpendStatus {
     pub ai_calls: i64,
     pub ai_total_tokens: i64,
     pub ai_estimated_cost_usd: f64,
+    pub ai_cost_complete: bool,
+    pub ai_usage_coverage: crate::db::AiUsageCoverage,
     pub ai_unattributed_legacy_calls: i64,
 }
 

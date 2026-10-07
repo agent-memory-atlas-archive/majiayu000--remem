@@ -13,7 +13,7 @@ pub(super) fn load_claimed_extraction_task(
         "SELECT t.id, t.task_kind, t.host_id, t.workspace_id, t.project_id, t.session_row_id,
                 h.name, p.project_path, s.session_id,
                 t.priority, t.cursor_event_id, t.high_watermark_event_id, t.attempts,
-                t.replay_range_id
+                t.replay_range_id, t.lease_owner
          FROM extraction_tasks t
          JOIN hosts h ON h.id = t.host_id
          JOIN projects p ON p.id = t.project_id
@@ -36,11 +36,22 @@ pub(super) fn load_claimed_extraction_task(
                 row.get::<_, Option<i64>>(11)?,
                 row.get::<_, i64>(12)?,
                 row.get::<_, Option<i64>>(13)?,
+                row.get::<_, Option<String>>(14)?,
             ))
         },
     )?;
 
-    let ai_profile = load_task_ai_profile(conn, row.2, row.4, row.5, row.11)?;
+    let ai_profile = if row
+        .14
+        .as_deref()
+        .is_some_and(crate::db::is_exact_replay_worker_owner)
+    {
+        // Exact admission has already resolved the explicit profile. Historical
+        // captured payloads must not choose or block this governed recovery.
+        None
+    } else {
+        load_task_ai_profile(conn, row.2, row.4, row.5, row.11)?
+    };
     Ok(ExtractionTask {
         id: row.0,
         task_kind: ExtractionTaskKind::from_db(&row.1)?,
@@ -87,15 +98,19 @@ fn load_task_ai_profile(
            AND (?4 IS NULL OR e.id <= ?4)
          ORDER BY e.id DESC",
     )?;
-    let contents = stmt
-        .query_map(
-            params![host_id, project_id, session_row_id, high_watermark_event_id],
-            |row| row.get::<_, String>(0),
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(contents
-        .iter()
-        .find_map(|content| crate::runtime_config::profile_from_payload_text(content)))
+    let mut rows = stmt.query(params![
+        host_id,
+        project_id,
+        session_row_id,
+        high_watermark_event_id
+    ])?;
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(0)?;
+        if let Some(profile) = crate::runtime_config::profile_from_payload_text(&content) {
+            return Ok(Some(profile));
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn ensure_task_updated(updated: usize, task_id: i64) -> Result<()> {

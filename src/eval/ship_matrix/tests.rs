@@ -545,3 +545,36 @@ fn test_gate(
         diagnostics: Vec::new(),
     }
 }
+
+#[test]
+fn platform_security_reports_are_bound_by_the_active_native_manifests() {
+    let public_root = Path::new(DEFAULT_PUBLIC_ROOT);
+    for (os, arch, manifest_name) in [
+        ("macos", "aarch64", "adversarial-policy-v2.json"),
+        (
+            "macos",
+            "x86_64",
+            "adversarial-policy-v2-x86_64-apple-darwin.json",
+        ),
+        (
+            "linux",
+            "aarch64",
+            "adversarial-policy-v2-aarch64-unknown-linux-gnu.json",
+        ),
+        ("linux", "x86_64", "adversarial-policy-v2-linux-x86_64.json"),
+    ] {
+        let manifest = read_json_value(&public_root.join("memory/manifests").join(manifest_name))
+            .expect("active native manifest");
+        let selected = security_report_for_platform(os, arch);
+        let relative = selected
+            .strip_prefix(public_root)
+            .expect("selected security report is below the public root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(
+            manifest["reports"],
+            serde_json::json!([relative]),
+            "{os}/{arch} must select the report actually registered by {manifest_name}"
+        );
+    }
+}

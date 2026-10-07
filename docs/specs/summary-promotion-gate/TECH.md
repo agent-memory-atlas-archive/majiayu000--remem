@@ -1,11 +1,44 @@
 # Summary Promotion Gate Technical Spec
 
 Status: Current contract
-Date: 2026-07-02
+
+Date: 2026-07-02; current-context amendment: 2026-10-06
 
 Tracking:
 - Spec/tracking issue: #674
 - Production evidence follow-up: #942
+- Audit remediation: #1105
+
+## Exact activation proof for current readers (GH-1105)
+
+G2's generic confidence floor remains 0.80. For a row excluded solely by that
+floor, a batched read-only verifier may establish a summary-specific confidence
+proof. It loads the current summary candidate and the latest immutable activation
+receipt for that memory, binds the candidate, memory payload, repository route,
+confidence, evidence set, and automatic actor to the existing activation request
+and result digests, then reruns `summary_auto_promote_verdict` over the candidate's
+own captured events. The existing activation fingerprint format is reused;
+neither historical receipts nor confidence values are rewritten.
+
+Only `summary` candidates in `auto_promoted` state qualify. Repository-local
+trust must agree between the current sources, candidate, memory, and receipt;
+external content and manual approval cannot borrow this proof. The verifier
+loads candidate/receipt rows and captured sources in batches, caches parsed source
+evidence only for that call, and limits the special proof to 256 bound events per
+memory. An unavailable or oversized proof fails closed to the ordinary G2 result.
+Read errors remain errors. The proof replaces only the generic confidence test,
+so provenance resolution, validity, mutable identity, suppression, and poisoning
+continue through their existing checks. No new schema or global cache is used.
+
+The verifier selects latest receipts and candidate operation records in batch
+aggregates. The operation record preserves the original supersession-list order
+needed to reconstruct the activation payload hash; its set must also match the
+receipt's normalized supersession set. SessionStart's final trust enrichment
+uses one batch admission and one direct-user trust query, not a fresh proof for
+each memory. Focused fixtures live in `memory/promote/tests/summary_current.rs`
+and `session_rollup/tests/summary_current.rs`; they create receipts through the
+production activation API and use only synthetic captured evidence and local
+temporary paths.
 
 ## Existing Implementation Facts
 

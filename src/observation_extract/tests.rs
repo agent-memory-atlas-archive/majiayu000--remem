@@ -1,3 +1,6 @@
+mod bounded_input;
+mod generated_output;
+
 use anyhow::Context;
 use rusqlite::params;
 
@@ -779,21 +782,5 @@ async fn observation_extract_accepts_explicit_no_observations() -> Result<()> {
     assert_eq!(result, ObservationExtractResult::NoObservations);
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))?;
     assert_eq!(count, 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn observation_extract_malformed_output_fails_closed() -> Result<()> {
-    let mut conn = setup_conn();
-    capture(&conn, "sess-bad", "important output")?;
-    let task = claim_extract_task(&mut conn)?;
-
-    let err = process_with_extractor(&mut conn, &task, |_prompt| async {
-        Ok("not json".to_string())
-    })
-    .await
-    .expect_err("malformed output should fail");
-
-    assert!(err.to_string().contains("malformed observation_extract"));
     Ok(())
 }

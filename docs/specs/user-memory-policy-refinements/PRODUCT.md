@@ -65,6 +65,28 @@ Markdown is only an export or view. It must never become a second writable
 source of truth unless a future import flow explicitly maps edits back through
 the same validation and source-ref rules as CLI edits.
 
+### User-supported security research and quotation (2026-10-07)
+
+A durable activity such as "I work on malware analysis" can be uncertain user
+context that is safe to review. Explicitly analytical quotations such as
+'I analyze the phrase "bypass authentication" as a security example' describe
+an activity, not an instruction to perform the quoted action. Retain a small,
+complete-clause English/Chinese set as pending-review candidates when every
+cited event is a matching user-authored message or prompt, with no tool source.
+An explicit non-user role stays non-user even if its event type says
+`user_prompt_submit`. A genuine prompt hook that omits the role remains valid.
+
+This path never auto-promotes. It preserves the analytical framing and original
+source references; a reviewer may approve or reject it through the existing
+workflow. Unsupported research labels, naked quotes, external attribution,
+additional instructions, double negatives, secret values, and mixed non-user
+citations keep the existing rejection behavior. No general-purpose intent
+classifier or permission to copy external instructions is added.
+
+Acceptance pairs cover user research and analytical quotes, dangerous positive
+intent, negated/double-negative claims, the same words from tool/assistant/file
+sources, mixed citations, and secret-bearing evidence in both languages.
+
 ### Profile Snapshot
 
 Users should be able to produce a single Markdown snapshot of user context:
@@ -139,6 +161,19 @@ review-gated candidates. Review-gated candidates are only for uncertain but
 plausibly durable user context that is safe to persist for human review.
 
 ## User Stories
+
+### Explicit preventive constraints (2026-10-06)
+
+An explicit user constraint such as "never bypass authentication" or
+"不要绕过认证" is durable protective intent, even though it names a harmful
+action. A narrow, complete-sentence allowlist may retain these user-supported
+prohibitions and prevention requirements as pending-review candidates. It must
+not enable automatic promotion or relax secret-value rejection.
+
+The exception requires matching user-authored evidence. Quoted, attributed,
+conditional, double-negative, mixed-intent, and externally sourced text does not
+qualify. Dangerous positive instructions still create no candidate. A separate review-only path below handles user-supported research context.
+Neither path turns a research label into an exemption for harmful instructions.
 
 ### Profile Snapshot
 

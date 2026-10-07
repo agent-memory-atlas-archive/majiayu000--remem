@@ -1,3 +1,5 @@
+mod ai_usage;
+mod ai_usage_coverage;
 mod legacy_surfaces;
 mod observability;
 mod poisoning_stats;
@@ -10,6 +12,8 @@ mod summaries;
 mod timeline;
 mod user_context_stats;
 
+pub use ai_usage::*;
+pub(crate) use ai_usage_coverage::{ai_usage_coverage_from_row, ai_usage_coverage_select};
 pub use legacy_surfaces::*;
 pub use observability::*;
 pub use poisoning_stats::*;

@@ -92,7 +92,7 @@ pub(super) use invariants::{
     V080_SCHEMA_INVARIANTS, V081_SCHEMA_INVARIANTS, V082_SCHEMA_INVARIANTS, V083_SCHEMA_INVARIANTS,
     V084_SCHEMA_INVARIANTS, V085_SCHEMA_INVARIANTS, V086_SCHEMA_INVARIANTS, V087_SCHEMA_INVARIANTS,
     V089_SCHEMA_INVARIANTS, V090_SCHEMA_INVARIANTS, V091_SCHEMA_INVARIANTS, V092_SCHEMA_INVARIANTS,
-    V093_SCHEMA_INVARIANTS,
+    V093_SCHEMA_INVARIANTS, V094_SCHEMA_INVARIANTS, V095_SCHEMA_INVARIANTS, V096_SCHEMA_INVARIANTS,
 };
 
 pub(crate) fn validate_schema_invariants(conn: &Connection) -> Result<Vec<String>> {
@@ -191,6 +191,9 @@ fn missing_schema_invariants(conn: &Connection, applied: &[i64]) -> Result<Vec<S
         .chain(V091_SCHEMA_INVARIANTS)
         .chain(V092_SCHEMA_INVARIANTS)
         .chain(V093_SCHEMA_INVARIANTS)
+        .chain(V094_SCHEMA_INVARIANTS)
+        .chain(V095_SCHEMA_INVARIANTS)
+        .chain(V096_SCHEMA_INVARIANTS)
     {
         if !applied.contains(&invariant.version) || schema_object_exists(conn, invariant.object)? {
             continue;

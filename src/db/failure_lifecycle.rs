@@ -33,6 +33,47 @@ pub enum FailureClass {
     Permanent,
 }
 
+/// Only generation consumers may attach this marker, after a provider returns
+/// text and before any persistence. Invalid generated text can be regenerated;
+/// the same words in a source-loader error do not make bad evidence retryable.
+#[derive(Debug)]
+pub(crate) struct ModelOutputError {
+    task_kind: crate::db::ExtractionTaskKind,
+    source: anyhow::Error,
+}
+
+impl std::fmt::Display for ModelOutputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "model_output_invalid kind={}: {}",
+            self.task_kind.as_str(),
+            self.source
+        )
+    }
+}
+
+impl std::error::Error for ModelOutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn model_output_error(
+    task_kind: crate::db::ExtractionTaskKind,
+    source: anyhow::Error,
+) -> anyhow::Error {
+    ModelOutputError { task_kind, source }.into()
+}
+
+pub(crate) fn classify_failure_error(error: &anyhow::Error) -> FailureClass {
+    if error.is::<ModelOutputError>() {
+        FailureClass::Transient
+    } else {
+        classify_failure(&error.to_string())
+    }
+}
+
 impl FailureClass {
     pub fn as_str(self) -> &'static str {
         match self {

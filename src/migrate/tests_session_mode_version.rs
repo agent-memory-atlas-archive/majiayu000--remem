@@ -23,7 +23,10 @@ fn v093_preserves_legacy_rows_and_defaults_for_old_writers() -> anyhow::Result<(
     assert_eq!(migration.name, "raw_session_mode_version");
     super::run_migrations(&conn)?;
     super::run_migrations(&conn)?;
-    assert_eq!(super::state::applied_versions(&conn)?.last(), Some(&93));
+    assert_eq!(
+        super::state::applied_versions(&conn)?.last(),
+        Some(&super::latest_schema_version())
+    );
     conn.execute(insert, ["old-writer"])?;
     let rows = conn
         .prepare(

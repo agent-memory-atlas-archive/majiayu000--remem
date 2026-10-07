@@ -14,7 +14,7 @@ use crate::memory::preference::consolidation::{
     load_active_preference_content, PreferenceConsolidationKind,
 };
 
-mod activation_request;
+pub(super) mod activation_request;
 mod dream_supersede;
 mod route_filter;
 mod write;

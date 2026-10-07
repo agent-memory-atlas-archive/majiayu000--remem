@@ -2,7 +2,18 @@
 
 Status: Current contract
 
-Refs #1017, #1029.
+## Summary confidence proof (GH-1105)
+
+`classify_memories` first computes the ordinary G2 classification, then verifies
+only the batch of rows excluded for `ConfidenceBelowFloor` against the existing
+candidate activation ledger and current summary source-support gate. A verified
+row is classified again with a summary confidence proof that replaces only that
+one numeric check. This does not reuse the broad direct-user/proven-lesson arm.
+The verification is read-only, batched, and has no process-global cache. Failure
+to establish an exact proof preserves the original exclusion; SQL failures stay
+visible. Other G2 and downstream suppression/poisoning checks remain unchanged.
+
+Refs #1017, #1029, #1105.
 
 The module separates fact from policy. `truth::classify_memory` and
 `truth::classify_memories` report the classification and never consult rollout

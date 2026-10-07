@@ -325,13 +325,9 @@ fn query_local_vector_channel(
     let Some(query_embedding) = query_embedding else {
         return Ok(vec![]);
     };
-    let profile = query_embedding.profile();
-    let mut conditions = vec!["e.model = ?1".to_string(), "e.dimensions = ?2".to_string()];
-    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(profile.model.to_string()),
-        Box::new(profile.dimensions as i64),
-    ];
-    let mut idx = 3;
+    let mut conditions = Vec::new();
+    let mut params = Vec::new();
+    let mut idx = 1;
     push_context_memory_filters(
         conn,
         project,
@@ -342,38 +338,27 @@ fn query_local_vector_channel(
         &mut conditions,
         &mut params,
     )?;
-    params.push(Box::new(
-        crate::retrieval::vector::VECTOR_SEARCH_CANDIDATE_LIMIT as i64,
-    ));
-
-    let sql = format!(
-        "SELECT e.memory_id, e.embedding, e.dimensions
-         FROM memory_embeddings e
-         JOIN memories m ON m.id = e.memory_id
-         WHERE {}
-         ORDER BY m.updated_at_epoch DESC, e.memory_id DESC
-         LIMIT ?{idx}",
-        conditions.join(" AND ")
-    );
-    let refs = crate::db::to_sql_refs(&params);
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(refs.as_slice(), |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, Vec<u8>>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
-    let mut hits = Vec::new();
-    for row in crate::db::query::collect_rows(rows)? {
-        let (memory_id, blob, dimensions) = row;
-        let embedding = crate::retrieval::vector::decode_embedding(&blob, dimensions)?;
-        let distance =
-            crate::retrieval::vector::cosine_distance(query_embedding.values(), &embedding)?;
-        hits.push((memory_id, distance));
+    let scope =
+        crate::retrieval::vector::VectorSearchScope::from_memory_predicates(conditions, params);
+    let outcome = crate::retrieval::vector::vector_search_embedding_with_scope(
+        conn,
+        &query_embedding,
+        &scope,
+        crate::retrieval::vector::VECTOR_SEARCH_CANDIDATE_LIMIT,
+    )?;
+    if let Some(reason) = outcome.disabled_reason {
+        crate::log::error(
+            "context",
+            &format!("vector context retrieval unavailable for {project}: {reason}"),
+        );
     }
-    hits.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    calibrated_vector_hits(hits, max_vector_distance)
+    calibrated_vector_hits(
+        outcome
+            .hits
+            .into_iter()
+            .map(|hit| (hit.memory_id, hit.distance)),
+        max_vector_distance,
+    )
 }
 
 fn query_local_like_channel(

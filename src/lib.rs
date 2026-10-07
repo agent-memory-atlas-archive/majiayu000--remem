@@ -28,6 +28,7 @@ pub mod hook_cli;
 mod hook_integrity;
 pub mod hook_runtime;
 mod hook_stdin;
+mod host_roots;
 pub mod identity;
 pub mod ingest;
 pub mod install;

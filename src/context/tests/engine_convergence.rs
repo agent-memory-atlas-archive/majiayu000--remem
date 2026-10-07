@@ -316,6 +316,69 @@ fn vector_weight_and_distance_each_reach_injection() {
 }
 
 #[test]
+fn injection_vector_retrieves_match_older_than_4096_newer_rows() -> anyhow::Result<()> {
+    let _env = ScopedFeatureHashEnv::new();
+    let conn = Connection::open_in_memory()?;
+    crate::migrate::run_migrations(&conn)?;
+    let query = "obscure semantic continuity probe";
+    let embedding = crate::retrieval::embedding::embed_query_if_enabled(query)?
+        .expect("feature-hash query fixture");
+    let exact = embedding
+        .values()
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>();
+    let far = embedding
+        .values()
+        .iter()
+        .flat_map(|value| (-value).to_le_bytes())
+        .collect::<Vec<_>>();
+    conn.execute_batch("BEGIN")?;
+    for id in 1..=4_097_i64 {
+        insert_memory(
+            &conn,
+            id,
+            PROJECT,
+            None,
+            "decision",
+            &format!("Unrelated title {id}"),
+            "Independent stored evidence",
+            1_710_000_000 + id,
+        );
+        conn.execute(
+            "INSERT INTO memory_embeddings(memory_id, embedding, dimensions, model, content_hash, updated_at_epoch)
+             VALUES (?1, ?2, ?3, ?4, 'synthetic', ?1)",
+            params![id, if id == 1 { &exact } else { &far }, embedding.dimensions() as i64, embedding.model()],
+        )?;
+    }
+    conn.execute_batch("COMMIT")?;
+    let mut weights = zero_injection_weights();
+    weights.vector = 1.0;
+    weights.usage = 0.0;
+    weights.max_vector_distance = 0.01;
+    assert_eq!(ids_for_query(&conn, query, weights), vec![1]);
+    // Both automatic consumers use this hybrid path. Also exercise native
+    // KNN after backfill; retrieval must not depend on mirror readiness.
+    crate::retrieval::vector::load_vec_extension(&conn)?;
+    for _ in 0..9 {
+        crate::retrieval::vector::ensure_vec_index(&conn)?;
+    }
+    assert_eq!(ids_for_query(&conn, query, weights), vec![1]);
+    let prompt_rows = super::super::prompt_submit_retrieval::retrieve(
+        &conn,
+        PROJECT,
+        query,
+        None,
+        &[],
+        4,
+        1_720_000_000,
+        &std::collections::HashSet::new(),
+    )?;
+    assert!(prompt_rows.memories.iter().any(|memory| memory.id == 1));
+    Ok(())
+}
+
+#[test]
 fn rrf_k_reaches_injection_fusion() {
     let conn = Connection::open_in_memory().expect("in-memory database");
     setup_context_schema(&conn);

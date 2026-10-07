@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use sha2::Digest;
 
 use super::fixture::{
     load_suite, load_suite_file_with_content_identity, validate_suite, validate_suite_selection,
@@ -376,10 +377,29 @@ async fn adversarial_policy_bench_reports_zero_policy_leaks() -> Result<()> {
     assert_eq!(opaque["metrics"]["policy"]["policy_failure_count"], 0);
 
     let verify = crate::eval::bench_artifact::verify_benchmark_artifacts(
-        crate::eval::bench_artifact::BenchVerifyOptions::new(root, "eval/claims/registry.json"),
+        crate::eval::bench_artifact::BenchVerifyOptions::new(
+            root.clone(),
+            "eval/claims/registry.json",
+        ),
     )?;
     assert!(verify.passed, "{:#?}", verify.failures);
     assert!(verify.run_artifacts_checked >= 25);
+    let relative_report = report_path
+        .strip_prefix(&root)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let consumed = verify
+        .verified_artifacts
+        .reports
+        .iter()
+        .find(|artifact| artifact.path == relative_report)
+        .expect("the generated security report must be consumed through its active manifest");
+    assert_eq!(consumed.value.run_artifacts, report.run_artifacts);
+    assert_eq!(
+        consumed.sha256,
+        format!("{:x}", sha2::Sha256::digest(fs::read(&report_path)?)),
+        "verification must consume the exact report just generated"
+    );
     Ok(())
 }
 

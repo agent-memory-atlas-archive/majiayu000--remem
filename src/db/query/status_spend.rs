@@ -26,6 +26,7 @@ pub struct LatestSessionMemorySpend {
     pub ai_calls: i64,
     pub ai_total_tokens: i64,
     pub ai_estimated_cost_usd: f64,
+    pub ai_usage_coverage: crate::db::AiUsageCoverage,
     pub ai_unattributed_legacy_calls: i64,
 }
 
@@ -93,20 +94,25 @@ pub fn query_latest_session_memory_spend(
         ai_calls,
         ai_total_tokens,
         ai_estimated_cost_usd,
+        ai_usage_coverage,
         ai_unattributed_legacy_calls,
     ) = if sqlite_column_exists(conn, "ai_usage_events", "session_id")? {
-        let (calls, total_tokens, estimated_cost_usd) = conn.query_row(
-            "SELECT COUNT(*),
+        let coverage = super::ai_usage_coverage_select(conn)?;
+        let (calls, total_tokens, estimated_cost_usd, usage_coverage) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*),
                         COALESCE(SUM(total_tokens), 0),
-                        COALESCE(SUM(estimated_cost_usd), 0.0)
+                        COALESCE(SUM(estimated_cost_usd), 0.0), {coverage}
                  FROM ai_usage_events
-                 WHERE session_id = ?1",
+                 WHERE session_id = ?1"
+            ),
             params![session_id.as_str()],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, f64>(2)?,
+                    super::ai_usage_coverage_from_row(row, 3)?,
                 ))
             },
         )?;
@@ -127,10 +133,18 @@ pub fn query_latest_session_memory_spend(
             calls,
             total_tokens,
             estimated_cost_usd,
+            usage_coverage,
             unattributed_legacy_calls,
         )
     } else {
-        ("unavailable".to_string(), 0, 0, 0.0, 0)
+        (
+            "unavailable".to_string(),
+            0,
+            0,
+            0.0,
+            crate::db::AiUsageCoverage::default(),
+            0,
+        )
     };
     let relevance = query_latest_relevance_spend(conn, &session_id)?;
 
@@ -158,6 +172,7 @@ pub fn query_latest_session_memory_spend(
         ai_calls,
         ai_total_tokens,
         ai_estimated_cost_usd,
+        ai_usage_coverage,
         ai_unattributed_legacy_calls,
     }))
 }
@@ -401,6 +416,11 @@ mod tests {
                 ai_calls: 2,
                 ai_total_tokens: 250,
                 ai_estimated_cost_usd: 0.0025,
+                ai_usage_coverage: crate::db::AiUsageCoverage {
+                    legacy_unverified_calls: 2,
+                    cost_incomplete_calls: 2,
+                    ..Default::default()
+                },
                 ai_unattributed_legacy_calls: 1,
             }
         );

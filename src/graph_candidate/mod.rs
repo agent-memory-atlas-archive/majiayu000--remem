@@ -17,6 +17,10 @@ mod parser;
 pub(crate) mod review;
 mod source;
 
+#[cfg(test)]
+#[path = "tests/replay_waiting.rs"]
+mod replay_waiting_tests;
+
 use parser::{parse_graph_candidates, parse_graph_defer_reason};
 use source::{
     build_graph_candidate_prompt, graph_candidate_blocked_by_memory_candidates,
@@ -126,7 +130,8 @@ where
 
     let prompt = build_graph_candidate_prompt(task, &batch);
     let response = generate(prompt).await?;
-    let candidates = parse_graph_candidates(&response)?;
+    let candidates = parse_graph_candidates(&response)
+        .map_err(|error| db::model_output_error(task.task_kind, error))?;
     if candidates.is_empty() {
         if let Some(reason) = parse_graph_defer_reason(&response) {
             return Ok(GraphCandidateResult::Deferred { reason });
@@ -134,7 +139,10 @@ where
         if response.contains("<no_graph_candidates") {
             return Ok(GraphCandidateResult::NoCandidates);
         }
-        bail!("malformed graph_candidate output: no candidates parsed");
+        return Err(db::model_output_error(
+            task.task_kind,
+            anyhow::anyhow!("malformed graph_candidate output: no candidates parsed"),
+        ));
     }
 
     let result = persist_graph_candidates(conn, task, &batch, &candidates)?;

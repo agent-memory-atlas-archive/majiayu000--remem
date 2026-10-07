@@ -36,7 +36,11 @@ fn with_env_vars<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
     result
 }
 
-fn with_pricing_config<T>(body: &str, vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+pub(super) fn with_pricing_config<T>(
+    body: &str,
+    vars: &[(&str, Option<&str>)],
+    f: impl FnOnce() -> T,
+) -> T {
     with_env_vars(vars, || {
         let path = std::env::temp_dir().join(format!(
             "remem-ai-pricing-{}-{}.toml",

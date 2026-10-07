@@ -9,6 +9,7 @@ import json
 import re
 from pathlib import Path
 
+from surface_lifecycle_cli import normalize_cli_construction
 from surface_lifecycle_evidence import (
     EXPERIMENTAL_CALLER_SYMBOLS,
     PRODUCTION_DEFAULT_GUARDS,
@@ -393,6 +394,7 @@ def _clap_args_contracts(root: Path) -> dict[str, str]:
     )
     for path in sorted((root / "src").rglob("*.rs")):
         text = path.read_text(encoding="utf-8")
+        text = normalize_cli_construction(text, _matching, _mask_comments)
         for match in pattern.finditer(text):
             cursor = match.end()
             while cursor < len(text) and text[cursor].isspace():
@@ -427,6 +429,7 @@ def _subcommand_enums(root: Path, features: set[str]) -> dict[str, list[tuple[tu
     args_contracts = _clap_args_contracts(root)
     for path in sorted((root / "src/cli").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
+        text = normalize_cli_construction(text, _matching, _mask_comments)
         enum_re = re.compile(
             r"(?P<attributes>(?:#\s*\[(?!\s*derive\s*\([^]]*\bSubcommand\b)[^]]*\]\s*)*)"
             r"#\s*\[\s*derive\s*\([^]]*\bSubcommand\b[^]]*\)\s*\]"

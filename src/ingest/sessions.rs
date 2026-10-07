@@ -104,7 +104,10 @@ pub fn default_scan_roots() -> Vec<ScanRoot> {
 }
 
 pub(crate) fn configured_scan_roots() -> Result<Vec<ScanRoot>> {
-    let roots = agent_sessions::Roots::from_env()?;
+    let mut roots = agent_sessions::Roots::from_env()?;
+    if roots.codex.is_some() {
+        roots.codex = Some(crate::host_roots::codex()?);
+    }
     if roots.claude.is_none() && roots.codex.is_none() {
         crate::log::warn("ingest-sessions", "home directory unavailable");
     }

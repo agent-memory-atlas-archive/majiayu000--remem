@@ -6,9 +6,21 @@ use toml_edit::{value, Array, DocumentMut, Item, Table};
 use crate::install::config::{build_hooks, remove_remem_hooks, strip_hooks_json, HookStrategy};
 use crate::install::host::{HookSupport, InstallHost};
 use crate::install::json_io::{read_json_file, write_json_file};
-use crate::install::paths::{codex_config_path, codex_hooks_path};
+pub(in crate::install) struct CodexHost {
+    root: PathBuf,
+}
 
-pub(in crate::install) struct CodexHost;
+impl CodexHost {
+    pub(super) fn from_env() -> Result<Self> {
+        Ok(Self {
+            root: crate::host_roots::codex()?,
+        })
+    }
+
+    fn hooks_path(&self) -> PathBuf {
+        self.root.join("hooks.json")
+    }
+}
 
 const SERVER_KEY: &str = "remem";
 
@@ -18,18 +30,15 @@ impl InstallHost for CodexHost {
     }
 
     fn config_path(&self) -> PathBuf {
-        codex_config_path()
+        self.root.join("config.toml")
     }
 
     fn is_available(&self) -> bool {
-        codex_config_path().exists()
-            || dirs::home_dir()
-                .map(|h| h.join(".codex").exists())
-                .unwrap_or(false)
+        self.root.exists()
     }
 
     fn install_mcp(&self, bin: &str) -> Result<()> {
-        let path = codex_config_path();
+        let path = self.config_path();
         let mut doc = read_toml_doc(&path)?;
         upsert_remem_server(&mut doc, bin)?;
         enable_codex_hooks(&mut doc)?;
@@ -38,7 +47,7 @@ impl InstallHost for CodexHost {
     }
 
     fn uninstall_mcp(&self, bin: &str) -> Result<()> {
-        let path = codex_config_path();
+        let path = self.config_path();
         if !path.exists() {
             return Ok(());
         }
@@ -49,32 +58,32 @@ impl InstallHost for CodexHost {
     }
 
     fn install_hooks(&self, bin: &str) -> Result<HookSupport> {
-        let config_path = codex_config_path();
+        let config_path = self.config_path();
         let mut doc = read_toml_doc(&config_path)?;
         enable_codex_hooks(&mut doc)?;
         write_toml_doc(&config_path, &doc)?;
-        apply_codex_hooks_json(&codex_hooks_path(), bin)?;
+        apply_codex_hooks_json(&self.hooks_path(), bin)?;
         Ok(HookSupport::Installed)
     }
 
     fn uninstall_hooks(&self, bin: &str) -> Result<()> {
-        strip_hooks_json(&codex_hooks_path(), bin)
+        strip_hooks_json(&self.hooks_path(), bin)
     }
 
     fn dry_run_plan(&self, bin: &str) -> Vec<String> {
         vec![
             format!(
                 "  MCP    -> {} (add [mcp_servers.{}])",
-                codex_config_path().display(),
+                self.config_path().display(),
                 SERVER_KEY
             ),
             format!(
                 "  config -> {} (set [features].hooks = true)",
-                codex_config_path().display()
+                self.config_path().display()
             ),
             format!(
                 "  hooks  -> {} (SessionStart/UserPromptSubmit/Stop)",
-                codex_hooks_path().display()
+                self.hooks_path().display()
             ),
             format!("  binary -> {}", bin),
         ]
@@ -334,7 +343,9 @@ codex_hooks = true
 
     #[test]
     fn dry_run_plan_discloses_hooks_feature_config_write() {
-        let host = CodexHost;
+        let host = CodexHost {
+            root: std::env::temp_dir().join("codex-plan"),
+        };
         let plan = host.dry_run_plan("/tmp/remem").join("\n");
 
         assert!(plan.contains("MCP"), "{plan}");

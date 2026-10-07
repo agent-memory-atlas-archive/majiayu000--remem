@@ -32,6 +32,11 @@ pub(super) fn build_rollup_prompt(
         range.from_event_id,
         range.to_event_id
     );
+    prompt.push_str(&format!(
+        "<input_budget max_input_bytes=\"{}\" provider_wrapper_reserve_bytes=\"{}\" per_event_content_bytes=\"{}\" content_truncated_event_ids=\"{}\" raw_evidence_retained=\"true\" />\n\n",
+        db::EXTRACTION_INPUT_MAX_BYTES, db::EXTRACTION_WRAPPER_RESERVE_BYTES, EVENT_CONTENT_LIMIT,
+        truncated_event_ids(range).iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+    ));
     prompt.push_str(
         "Return exactly this XML shape:\n\
          <summary>overall session summary</summary>\n\
@@ -94,7 +99,7 @@ pub(super) fn build_rollup_prompt(
             };
             content.clone()
         } else {
-            let redacted_content = crate::adapter::common::redact_sensitive_text(&event.content);
+            let redacted_content = redacted_event_content(event);
             db::truncate_str(&redacted_content, EVENT_CONTENT_LIMIT).to_string()
         };
         let gap_before = previous_epoch.map(|epoch| (event.created_at_epoch - epoch).max(0));
@@ -139,6 +144,57 @@ fn is_codex_transcript_message_event(event: &super::RollupEvent) -> bool {
             == Some(crate::memory::raw_transcript::CODEX_TRANSCRIPT_MESSAGE_TOOL)
 }
 
+fn redacted_event_content(event: &super::RollupEvent) -> String {
+    crate::adapter::common::redact_sensitive_text(&event.content)
+}
+
+pub(super) fn truncated_event_ids(range: &RollupRange) -> Vec<i64> {
+    range
+        .events
+        .iter()
+        .filter_map(|event| {
+            let limit = if is_codex_transcript_message_event(event) {
+                TRANSCRIPT_MESSAGE_CONTENT_LIMIT
+            } else {
+                EVENT_CONTENT_LIMIT
+            };
+            (redacted_event_content(event).len() > limit).then_some(event.id)
+        })
+        .collect()
+}
+
+/// A captured event must not disappear just because supplemental transcript
+/// messages used the shared budget. Shrink the attempted prefix instead.
+pub(super) fn captured_transcript_events_fit(
+    range: &RollupRange,
+    evidence: &PromptTranscriptEvidence,
+) -> bool {
+    let bytes: usize = evidence
+        .messages
+        .iter()
+        .map(|message| message.content.len())
+        .sum();
+    let bounded = bounded_transcript_event_content(
+        range,
+        TRANSCRIPT_MESSAGE_COUNT_LIMIT.saturating_sub(evidence.messages.len()),
+        TRANSCRIPT_TOTAL_CONTENT_LIMIT.saturating_sub(bytes),
+    );
+    range
+        .events
+        .iter()
+        .filter(|event| is_codex_transcript_message_event(event))
+        .all(|event| {
+            let redacted = redacted_event_content(event);
+            let expected =
+                db::truncate_str(redacted.trim(), TRANSCRIPT_MESSAGE_CONTENT_LIMIT).trim_end();
+            expected.is_empty()
+                || bounded
+                    .by_event_id
+                    .get(&event.id)
+                    .is_some_and(|content| content == expected)
+        })
+}
+
 fn bounded_transcript_event_content(
     range: &RollupRange,
     message_limit: usize,
@@ -158,7 +214,7 @@ fn bounded_transcript_event_content(
             bounded.truncated = true;
             continue;
         }
-        let redacted = crate::adapter::common::redact_sensitive_text(&event.content);
+        let redacted = redacted_event_content(event);
         let redacted = redacted.trim();
         if redacted.is_empty() {
             continue;

@@ -30,6 +30,60 @@ fn low_risk_explicit_user_statement_can_auto_promote() -> Result<()> {
 }
 
 #[test]
+fn preventive_security_constraint_cannot_request_automatic_promotion() -> Result<()> {
+    for (claim, source) in [
+        (
+            "User requires agents never to bypass authentication.",
+            "I require agents never to bypass authentication.",
+        ),
+        ("用户要求不要绕过认证。", "我要求不要绕过认证。"),
+    ] {
+        let conn = migrated_conn()?;
+        let mut req = candidate_request(claim, true);
+        req.claim_type = UserContextClaimType::Constraint;
+        req.claim_key = Some("constraint:security");
+        req.confidence = 0.99;
+        req.source_preview = Some(source);
+        let result = create_candidate(&conn, &req)?;
+        assert_eq!(result.candidate.review_status, "pending_review");
+        assert_eq!(
+            result.candidate.auto_promote_block_reason.as_deref(),
+            Some("preventive_security_constraint_requires_review")
+        );
+        assert!(result.claim.is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn security_research_requires_review_even_when_caller_requests_auto_promotion() -> Result<()> {
+    for (claim, source) in [
+        (
+            "User works on malware analysis.",
+            "I work on malware analysis.",
+        ),
+        ("用户从事恶意软件分析。", "我从事恶意软件分析。"),
+    ] {
+        let conn = migrated_conn()?;
+        let mut req = candidate_request(claim, true);
+        // A caller cannot evade mandatory review by marking the activity as
+        // an otherwise auto-promotable preference with very high confidence.
+        req.claim_type = UserContextClaimType::Preference;
+        req.claim_key = Some("activity:security-research");
+        req.confidence = 0.99;
+        req.source_preview = Some(source);
+        let result = create_candidate(&conn, &req)?;
+        assert_eq!(result.candidate.review_status, "pending_review");
+        assert_eq!(
+            result.candidate.auto_promote_block_reason.as_deref(),
+            Some(crate::user_context::non_retention::research::REVIEW_REASON)
+        );
+        assert!(result.claim.is_none());
+    }
+    Ok(())
+}
+
+#[test]
 fn strict_policy_blocks_relaxed_default_confidence() -> Result<()> {
     let conn = migrated_conn()?;
     let mut req = candidate_request("Prefer concise review notes", true);

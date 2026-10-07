@@ -7,7 +7,12 @@ pub use super::vector_candidates::VECTOR_SEARCH_CANDIDATE_LIMIT;
 mod backfill;
 mod coverage;
 mod reindex;
+mod scope;
+mod search;
 mod vec_index;
+
+pub(crate) use scope::VectorSearchScope;
+pub(crate) use search::vector_search_embedding_with_scope;
 
 pub(crate) use vec_index::ensure_vec_index;
 
@@ -334,126 +339,29 @@ pub fn vector_search_embedding_filtered(
     filters: VectorSearchFilters<'_>,
     limit: usize,
 ) -> Result<VectorSearchOutcome> {
-    if limit == 0 {
-        return Ok(VectorSearchOutcome::ready(vec![]));
+    vector_search_embedding_filtered_with_suppression_policy(
+        conn,
+        query_embedding,
+        filters,
+        true,
+        limit,
+    )
+}
+
+pub(crate) fn vector_search_embedding_filtered_with_suppression_policy(
+    conn: &Connection,
+    query_embedding: &TextEmbedding,
+    filters: VectorSearchFilters<'_>,
+    include_suppressed: bool,
+    limit: usize,
+) -> Result<VectorSearchOutcome> {
+    let mut scope = VectorSearchScope::from_filters(filters);
+    if !include_suppressed {
+        scope
+            .conditions
+            .push(crate::memory::suppression::memory_policy_filter_sql("m"));
     }
-    crate::memory::retrieval_enrichment::ensure_retrieval_open(conn)?;
-    if super::embedding::provider_disabled_or_error()? {
-        return Ok(VectorSearchOutcome::disabled("embedding provider is off"));
-    }
-    if !table_exists(conn, "memory_embeddings")? {
-        return Ok(VectorSearchOutcome::disabled(
-            "memory_embeddings table is missing; run migrations/backfill",
-        ));
-    }
-    let mut timings = Vec::new();
-    let profile = query_embedding.profile();
-    let knn_hits = crate::perf::time_result(&mut timings, "vector_knn_index", || {
-        vec_index::knn_candidates(
-            conn,
-            query_embedding.values(),
-            profile,
-            filters,
-            super::vector_candidates::vector_candidate_limit(limit),
-        )
-    })?;
-    if let Some(mut hits) = knn_hits {
-        // An empty KNN answer falls through to the portable path so the
-        // caller still gets its empty-store / missing-profile diagnostics.
-        if !hits.is_empty() {
-            let candidates_scanned = hits.len();
-            hits.truncate(limit);
-            return Ok(VectorSearchOutcome::ready_with_scan_count_and_timings(
-                hits,
-                candidates_scanned,
-                timings,
-            ));
-        }
-    }
-    let candidate_ids = crate::perf::time_result(&mut timings, "vector_select_candidates", || {
-        super::vector_candidates::select_candidate_ids(conn, filters, profile, limit)
-    })?;
-    let candidates_scanned = candidate_ids.len();
-    if candidate_ids.is_empty() {
-        if super::vector_candidates::matching_memory_count(conn, filters)? > 0 {
-            if embedding_count(conn)? == 0 {
-                return Ok(VectorSearchOutcome::disabled_with_timings(
-                    "memory_embeddings table is empty; run `remem reindex-embeddings --limit 1000`",
-                    timings,
-                ));
-            }
-            return Ok(VectorSearchOutcome::disabled_with_timings(
-                format!(
-                    "memory_embeddings has no rows for model={} dimensions={}; run `remem reindex-embeddings --limit 1000`",
-                    profile.model, profile.dimensions
-                ),
-                timings,
-            ));
-        }
-        return Ok(VectorSearchOutcome::ready_with_scan_count_and_timings(
-            vec![],
-            0,
-            timings,
-        ));
-    }
-    let placeholders = std::iter::repeat_n("?", candidate_ids.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT memory_id, embedding, dimensions
-         FROM memory_embeddings INDEXED BY idx_memory_embeddings_profile_memory_id
-         WHERE model = ?
-           AND dimensions = ?
-           AND memory_id IN ({placeholders})"
-    );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-        Box::new(profile.model.to_string()),
-        Box::new(profile.dimensions as i64),
-    ];
-    param_values.extend(
-        candidate_ids
-            .iter()
-            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>),
-    );
-    let candidates = crate::perf::time_result(&mut timings, "vector_load_embeddings", || {
-        let refs = crate::db::to_sql_refs(&param_values);
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(refs.as_slice(), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        crate::db::query::collect_rows(rows)
-    })?;
-    let mut hits = crate::perf::time_result(&mut timings, "vector_decode_cosine", || {
-        let mut hits = Vec::new();
-        for (memory_id, blob, dimensions) in candidates {
-            let embedding = decode_embedding(&blob, dimensions)
-                .with_context(|| format!("invalid embedding blob for memory id={memory_id}"))?;
-            let distance = cosine_distance(query_embedding.values(), &embedding)?;
-            hits.push(VectorHit {
-                memory_id,
-                distance,
-            });
-        }
-        Ok(hits)
-    })?;
-    crate::perf::time_value(&mut timings, "vector_sort_truncate", || {
-        hits.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.memory_id.cmp(&b.memory_id))
-        });
-        hits.truncate(limit);
-    });
-    Ok(VectorSearchOutcome::ready_with_scan_count_and_timings(
-        hits,
-        candidates_scanned,
-        timings,
-    ))
+    vector_search_embedding_with_scope(conn, query_embedding, &scope, limit)
 }
 
 pub fn find_similar_observations(
@@ -501,16 +409,39 @@ fn upsert_embedding_with_metadata(
     embedding: &[f32],
     updated_at_epoch: i64,
 ) -> Result<()> {
-    let mut stmt = conn.prepare(UPSERT_EMBEDDING_SQL)?;
-    execute_embedding_upsert(
-        &mut stmt,
-        memory_id,
-        model,
-        content_hash,
-        embedding,
-        updated_at_epoch,
-    )?;
-    vec_index::sync_vec_upsert(conn, memory_id, model, embedding.len())
+    with_embedding_savepoint(conn, "remem_embedding_upsert", || {
+        let mut stmt = conn.prepare(UPSERT_EMBEDDING_SQL)?;
+        execute_embedding_upsert(
+            &mut stmt,
+            memory_id,
+            model,
+            content_hash,
+            embedding,
+            updated_at_epoch,
+        )?;
+        vec_index::sync_vec_upsert(conn, memory_id, model, embedding.len())
+    })
+}
+
+fn with_embedding_savepoint<T>(
+    conn: &Connection,
+    name: &str,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+    match action() {
+        Ok(value) => {
+            conn.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
+            Ok(value)
+        }
+        Err(error) => {
+            conn.execute_batch(&format!(
+                "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+            ))
+            .context("rollback embedding transaction")?;
+            Err(error)
+        }
+    }
 }
 
 fn execute_embedding_upsert(
@@ -521,15 +452,7 @@ fn execute_embedding_upsert(
     embedding: &[f32],
     updated_at_epoch: i64,
 ) -> Result<()> {
-    if model.trim().is_empty() {
-        anyhow::bail!("embedding model must not be empty");
-    }
-    if embedding.is_empty() {
-        anyhow::bail!("embedding vector must not be empty");
-    }
-    if embedding.iter().any(|value| !value.is_finite()) {
-        anyhow::bail!("embedding vector contains non-finite values");
-    }
+    validate_embedding(model, embedding)?;
     let blob = encode_embedding(embedding);
     let dimensions = embedding.len() as i64;
     stmt.execute(params![
@@ -540,6 +463,19 @@ fn execute_embedding_upsert(
         content_hash,
         updated_at_epoch
     ])?;
+    Ok(())
+}
+
+fn validate_embedding(model: &str, embedding: &[f32]) -> Result<()> {
+    if model.trim().is_empty() {
+        anyhow::bail!("embedding model must not be empty");
+    }
+    if embedding.is_empty() {
+        anyhow::bail!("embedding vector must not be empty");
+    }
+    if embedding.iter().any(|value| !value.is_finite()) {
+        anyhow::bail!("embedding vector contains non-finite values");
+    }
     Ok(())
 }
 

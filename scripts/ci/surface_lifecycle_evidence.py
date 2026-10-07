@@ -12,6 +12,8 @@ import subprocess
 import tomllib
 from pathlib import Path
 
+from surface_lifecycle_cli import normalize_cli_construction
+
 
 EXPERIMENTAL_CALLER_SYMBOLS = {
     "mcp-context-bundle": ("fn context_bundle(", ".context_bundle("),
@@ -237,6 +239,7 @@ def default_feature_contracts(root: Path) -> set[str]:
 
 def clap_root_contract(root: Path) -> tuple[str, str]:
     text = mask_cfg_test_blocks((root / "src/cli/types.rs").read_text(encoding="utf-8"))
+    text = normalize_cli_construction(text, _matching_delimiter, mask_rust_comments)
     match = re.search(r"#\s*\[\s*derive\s*\([^]]*\bParser\b[^]]*\)\s*\](?:\s*#\s*\[[^]]*\])*\s*(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+Cli\s*\{", text, re.S)
     if not match: raise RuntimeError("cannot resolve root Clap Parser declaration")
     end = _matching_brace(text, match.end() - 1); raw = text[match.start() : end + 1]

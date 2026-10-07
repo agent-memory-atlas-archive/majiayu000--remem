@@ -438,8 +438,13 @@ mod tests {
             conn.execute(
                 "INSERT INTO memory_embeddings
                  (memory_id, embedding, dimensions, model, content_hash, updated_at_epoch)
-                 VALUES (1, ?1, 4, 'normalized-model', 'hash', 1)",
-                params![vec![0_u8; 16]],
+                 VALUES (1, ?1, 4, 'normalized-model', ?2, 1)",
+                params![
+                    vec![0_u8; 16],
+                    crate::retrieval::embedding::memory_index_hash(
+                        "Memory", "Content", "decision", None, ""
+                    )
+                ],
             )?;
 
             let checks = check_embedding_provider(Some(&conn));

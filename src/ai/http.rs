@@ -2,8 +2,9 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
+use super::usage_observation::{Counter, UsageObservation};
 use crate::ai::config::resolve_model_for_api;
-use crate::ai::types::{AiCallResult, TokenUsage, AI_TIMEOUT_SECS};
+use crate::ai::types::{AiCallFailure, AiCallResult, AI_TIMEOUT_SECS};
 use crate::runtime_config::ResolvedMemoryAiProfile;
 
 /// Process-wide HTTP client shared across AI calls.
@@ -64,26 +65,46 @@ pub(super) async fn call_http(
         .send()
         .await?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp
             .text()
             .await
-            .unwrap_or_else(|error| format!("<body read error: {}>", error));
-        anyhow::bail!("Anthropic API error {}: {}", status, text);
+            .unwrap_or_else(|error| format!("<body read error: {error}>"));
+        let usage = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .as_ref()
+            .and_then(extract_usage);
+        return Err(AiCallFailure::with_evidence(
+            anyhow::anyhow!("Anthropic API error {}: {}", status, body),
+            AiCallResult {
+                text: String::new(),
+                executor: "http",
+                model: model.to_string(),
+                usage,
+                usage_source: Some("anthropic_usage"),
+            },
+        ));
     }
-
     let data: serde_json::Value = resp.json().await?;
-    let text = extract_text(&data)?;
-    let usage = extract_usage(&data);
+    parse_response(&data, model)
+}
 
-    Ok(AiCallResult {
-        text,
+fn parse_response(data: &serde_json::Value, model: &str) -> Result<AiCallResult> {
+    let mut evidence = AiCallResult {
+        text: String::new(),
         executor: "http",
         model: model.to_string(),
-        usage,
+        usage: extract_usage(data),
         usage_source: Some("anthropic_usage"),
-    })
+    };
+    match extract_text(data) {
+        Ok(text) => {
+            evidence.text = text;
+            Ok(evidence)
+        }
+        Err(error) => Err(AiCallFailure::with_evidence(error, evidence)),
+    }
 }
 
 fn extract_text(data: &serde_json::Value) -> Result<String> {
@@ -107,34 +128,84 @@ fn extract_text(data: &serde_json::Value) -> Result<String> {
     Ok(text)
 }
 
-fn json_i64(data: &serde_json::Value, key: &str) -> i64 {
-    data.get(key)
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(0)
-}
-
-fn extract_usage(data: &serde_json::Value) -> Option<TokenUsage> {
+fn extract_usage(data: &serde_json::Value) -> Option<UsageObservation> {
     let usage = data.get("usage")?;
-    let input_tokens = json_i64(usage, "input_tokens");
-    let output_tokens = json_i64(usage, "output_tokens");
-    let cache_creation_tokens = json_i64(usage, "cache_creation_input_tokens");
-    let cache_read_tokens = json_i64(usage, "cache_read_input_tokens");
-    let token_usage = TokenUsage {
-        input_tokens,
-        output_tokens,
-        cache_creation_tokens,
-        cache_read_tokens,
-        raw_input_tokens: input_tokens + cache_creation_tokens + cache_read_tokens,
-        raw_output_tokens: output_tokens,
-        ..TokenUsage::default()
-    };
-    (!token_usage.is_empty()).then_some(token_usage)
+    if usage.is_null() {
+        return Some(UsageObservation::missing());
+    }
+    if !usage.is_object() {
+        return Some(UsageObservation::from_counters(
+            [Counter::Invalid; 7],
+            false,
+        ));
+    }
+    let input = Counter::read(usage, "input_tokens");
+    let output = Counter::read(usage, "output_tokens");
+    let creation = Counter::optional_zero(usage, "cache_creation_input_tokens");
+    let cache_read = Counter::optional_zero(usage, "cache_read_input_tokens");
+    let reported = [
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .into_iter()
+    .any(|key| Counter::read(usage, key).is_reported());
+    Some(UsageObservation::from_counters(
+        [
+            input,
+            output,
+            Counter::Known(0),
+            creation,
+            cache_read,
+            Counter::sum(&[input, creation, cache_read]),
+            output,
+        ],
+        reported,
+    ))
 }
 
 #[cfg(test)]
 mod http_tests {
-    use super::{extract_text, extract_usage, shared_client};
+    use super::{extract_text, extract_usage, parse_response, shared_client};
     use serde_json::json;
+
+    #[test]
+    fn usage_observation_http_preserves_missing_invalid_zero_and_failed_text() {
+        use crate::ai::UsageStatus;
+        let zero = extract_usage(&json!({"usage":{"input_tokens":0,"output_tokens":0}})).unwrap();
+        assert_eq!(zero.status, UsageStatus::Complete);
+        assert!(zero.has_reported_counters);
+        for value in [
+            json!({"input_tokens":100}),
+            json!({"input_tokens":100,"output_tokens":null}),
+        ] {
+            let usage = extract_usage(&json!({"usage":value})).unwrap();
+            assert_eq!(usage.status, UsageStatus::Partial);
+            assert_eq!(usage.known_total_tokens, 100);
+        }
+        for value in [
+            json!({"input_tokens":100,"output_tokens":"40"}),
+            json!({"input_tokens":100,"output_tokens":-1}),
+        ] {
+            assert_eq!(
+                extract_usage(&json!({"usage":value})).unwrap().status,
+                UsageStatus::Invalid
+            );
+        }
+        let error = parse_response(
+            &json!({"content":[],"usage":{"input_tokens":100,"output_tokens":40}}),
+            "haiku",
+        )
+        .unwrap_err();
+        let failure = error
+            .downcast_ref::<crate::ai::types::AiCallFailure>()
+            .unwrap();
+        assert_eq!(
+            failure.evidence.usage.as_ref().unwrap().known_total_tokens,
+            140
+        );
+    }
 
     #[test]
     fn shared_client_is_reused_across_calls() {
@@ -200,7 +271,7 @@ mod http_tests {
                 "cache_read_input_tokens": 300
             }
         });
-        let usage = extract_usage(&data).expect("usage should parse");
+        let usage = extract_usage(&data).expect("usage should parse").tokens;
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 40);
         assert_eq!(usage.cache_creation_tokens, 20);

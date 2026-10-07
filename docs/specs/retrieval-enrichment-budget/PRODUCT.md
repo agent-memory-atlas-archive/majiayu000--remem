@@ -28,6 +28,9 @@ billing unit used by those models and must not be presented as USD truth.
 - A once worker processes at most four potential AI work items across current
   extraction tasks, AI-backed durable jobs, and retrieval enrichment; it
   also stops admitting new work after 180 seconds.
+- Ready extraction and durable-job lanes, and stage/host/project groups within
+  them, receive service according to persisted fair claim order. Continuous
+  capture cannot monopolize every once-worker admission (Refs #1105).
 - New or canonically changed memories still receive automatic enrichment.
 - A row stops automatic retries after three failed enrichment attempts.
 - Historical and exhausted rows remain stored, searchable through their

@@ -470,6 +470,21 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         name: "raw_session_mode_version",
         sql: include_str!("../migrations/v093_raw_session_mode_version.sql"),
     },
+    Migration {
+        version: 94,
+        name: "extraction_completed_progress",
+        sql: include_str!("../migrations/v094_extraction_completed_progress.sql"),
+    },
+    Migration {
+        version: 95,
+        name: "worker_fair_dispatch",
+        sql: include_str!("../migrations/v095_worker_fair_dispatch.sql"),
+    },
+    Migration {
+        version: 96,
+        name: "ai_usage_observation",
+        sql: include_str!("../migrations/v096_ai_usage_observation.sql"),
+    },
 ];
 
 pub(crate) const OLD_BASELINE_VERSION: i64 = 13;

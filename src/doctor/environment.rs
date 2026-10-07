@@ -16,7 +16,8 @@ pub(super) fn check_binary() -> Check {
 }
 
 pub(super) fn check_install_paths() -> Check {
-    let mut configured = configured_remem_paths_for(active_hosts());
+    let hosts = active_hosts();
+    let mut configured = configured_remem_paths_for(hosts.probes);
     if configured.is_empty() {
         configured.extend(
             std::env::var_os("REMEM_INSTALL_BINARY")
@@ -28,12 +29,20 @@ pub(super) fn check_install_paths() -> Check {
         crate::install::duplicates::inspect_install_paths_with_configured_paths(&configured);
     Check::new(
         "Install paths",
-        if report.has_warning() {
+        if hosts.codex_error.is_some() {
+            Status::Fail
+        } else if report.has_warning() {
             Status::Warn
         } else {
             Status::Ok
         },
-        crate::install::duplicates::format_doctor_detail(&report),
+        match hosts.codex_error {
+            Some(error) => format!(
+                "{}; invalid Codex home: {error}",
+                crate::install::duplicates::format_doctor_detail(&report)
+            ),
+            None => crate::install::duplicates::format_doctor_detail(&report),
+        },
     )
 }
 
@@ -56,23 +65,36 @@ struct HostProbe {
     mcp_paths: Vec<PathBuf>,
 }
 
-fn known_hosts() -> Vec<HostProbe> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    vec![
-        HostProbe {
-            name: "claude",
-            hooks_path: home.join(".claude").join("settings.json"),
-            mcp_paths: vec![
-                home.join(".claude.json"),
-                home.join(".claude").join("claude_desktop_config.json"),
-            ],
-        },
-        HostProbe {
-            name: "codex",
-            hooks_path: home.join(".codex").join("hooks.json"),
-            mcp_paths: vec![home.join(".codex").join("config.toml")],
-        },
-    ]
+struct HostDiscovery {
+    probes: Vec<HostProbe>,
+    codex_error: Option<String>,
+}
+
+fn known_hosts() -> HostDiscovery {
+    let home = crate::host_roots::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut probes = vec![HostProbe {
+        name: "claude",
+        hooks_path: home.join(".claude").join("settings.json"),
+        mcp_paths: vec![
+            home.join(".claude.json"),
+            home.join(".claude").join("claude_desktop_config.json"),
+        ],
+    }];
+    let codex_error = match crate::host_roots::codex() {
+        Ok(codex_home) => {
+            probes.push(HostProbe {
+                name: "codex",
+                hooks_path: codex_home.join("hooks.json"),
+                mcp_paths: vec![codex_home.join("config.toml")],
+            });
+            None
+        }
+        Err(error) => Some(error.to_string()),
+    };
+    HostDiscovery {
+        probes,
+        codex_error,
+    }
 }
 
 /// True if the host's config directory exists — i.e. the tool is installed
@@ -83,15 +105,38 @@ fn host_present(probe: &HostProbe) -> bool {
         || probe.mcp_paths.iter().any(|path| path.exists())
 }
 
-fn active_hosts() -> Vec<HostProbe> {
-    known_hosts().into_iter().filter(host_present).collect()
+fn active_hosts() -> HostDiscovery {
+    let mut hosts = known_hosts();
+    hosts.probes.retain(host_present);
+    hosts
+}
+
+pub(super) fn active_host_names() -> (Vec<&'static str>, Option<String>) {
+    let hosts = active_hosts();
+    (
+        hosts.probes.iter().map(|probe| probe.name).collect(),
+        hosts.codex_error,
+    )
 }
 
 /// Produce one Check per detected host's hooks file. Hosts whose config
 /// directory doesn't exist are silently skipped — they aren't installed, so
 /// there's nothing to validate.
 pub(super) fn check_hooks() -> Vec<Check> {
-    check_hooks_for(active_hosts())
+    let hosts = active_hosts();
+    let mut checks = if hosts.probes.is_empty() && hosts.codex_error.is_some() {
+        Vec::new()
+    } else {
+        check_hooks_for(hosts.probes)
+    };
+    if let Some(error) = hosts.codex_error {
+        checks.push(Check::new(
+            "Hooks (codex)",
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        ));
+    }
+    checks
 }
 
 fn check_hooks_for(hosts: Vec<HostProbe>) -> Vec<Check> {
@@ -110,7 +155,20 @@ fn check_hooks_for(hosts: Vec<HostProbe>) -> Vec<Check> {
 }
 
 pub(super) fn check_mcp() -> Vec<Check> {
-    check_mcp_for(active_hosts())
+    let hosts = active_hosts();
+    let mut checks = if hosts.probes.is_empty() && hosts.codex_error.is_some() {
+        Vec::new()
+    } else {
+        check_mcp_for(hosts.probes)
+    };
+    if let Some(error) = hosts.codex_error {
+        checks.push(Check::new(
+            "MCP (codex)",
+            Status::Fail,
+            format!("invalid Codex home: {error}"),
+        ));
+    }
+    checks
 }
 
 fn check_mcp_for(hosts: Vec<HostProbe>) -> Vec<Check> {

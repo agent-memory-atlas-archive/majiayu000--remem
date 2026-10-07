@@ -320,6 +320,50 @@ Required tests:
 - third-party candidate text stays pending review unless explicitly approved by
   review flow.
 
+### Explicit preventive constraints (2026-10-06)
+
+The deterministic harmful-content scanner recognizes only complete English and
+Chinese prohibition/prevention templates. Both candidate text and source preview
+must resolve to the same allowed constraint; leading attribution, quotation,
+extra clauses, conditionals, double negation and unsafe affirmative actions fail
+closed. Secret scanning runs first and is never bypassed by this exception.
+
+Extraction must bind this narrow exception to the actual cited user-authored
+events, with no tool/file source or mixed non-user citations. A small exact
+constraint comparison supports Chinese without broadening the existing general
+source-support matcher. This exception keeps one complete matching source clause
+as its preview so repeated citations cannot produce a truncated partial clause;
+all cited events still undergo the same provenance and constraint checks. The
+candidate store also forces these newly retained
+constraints to pending review even if generated metadata requests automatic
+promotion. Existing human review remains the activation route.
+
+Paired extraction and scanner tests cover English/Chinese protective versus
+affirmative intent, secrets, quotations, double negatives, conditional/mixed
+clauses, and external evidence. The prompt distinguishes explicit preventive
+constraints from harmful claims. Bare research labels remain blocked; the review-only extension below requires
+a complete supported user activity.
+
+### Review-only security context (2026-10-07)
+
+The source batch treats an explicit role as authoritative: only `user` counts
+as user-authored. `user_prompt_submit` supplies that identity only when the role
+is absent; it cannot override an explicit assistant, tool or system role.
+This shared rule protects both research and preventive-constraint exceptions.
+
+`non_retention::research` recognizes complete user activity clauses and explicit
+analytical quotations, with separate stable keys for their topics and framing.
+It shares no prefix/substring exemption with harmful-instruction detection.
+Secret and non-retention checks still run before candidate insertion. Only a
+matching complete claim/preview pair can enter this path.
+
+`extraction::research_context` additionally requires an activity, skill or role
+claim and validates every citation against the original event's role, type,
+tool provenance and complete clause. Repeated valid sources keep one complete
+preview; no truncated source can conceal a later unsafe citation. The shared
+candidate store forces review even if a caller requests automatic promotion.
+Human approval retains the existing final non-retention recheck.
+
 ## Issue Split
 
 Recommended GitHub issue split:

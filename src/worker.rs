@@ -5,6 +5,7 @@ use crate::db;
 
 mod admission;
 mod cleanup;
+mod heartbeat;
 mod job;
 mod legacy_pending;
 mod lock;
@@ -282,6 +283,7 @@ pub async fn run_exact_replay(
     );
     let mut conn = db::open_db()?;
     record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
+    let _heartbeat = heartbeat::Registration::new(&lease_owner);
     let task = db::retry_and_claim_extraction_replay_range(
         &mut conn,
         range_id,
@@ -330,6 +332,8 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         let conn = db::open_db()?;
         record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
     }
+
+    let _heartbeat = heartbeat::Registration::new(&lease_owner);
 
     let mut legacy_pending_migration_schedule = legacy_pending::new_schedule(once, Instant::now());
     let mut retrieval_enrichment_schedule =
@@ -474,12 +478,14 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         if stop_for_exhausted_once_budget(&run_budget, Instant::now()) {
             break;
         }
-        if crate::extraction_worker::run_next(
-            &lease_owner,
-            JOB_LEASE_SECS,
-            EXTRACTION_TASK_TIMEOUT_SECS,
-        )
-        .await?
+        let extraction_first = db::preferred_worker_queue(&conn)? != Some(db::WorkerQueue::Job);
+        if extraction_first
+            && crate::extraction_worker::run_next(
+                &lease_owner,
+                JOB_LEASE_SECS,
+                EXTRACTION_TASK_TIMEOUT_SECS,
+            )
+            .await?
         {
             run_budget.record_work_items(1);
             continue;
@@ -544,6 +550,24 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
             continue;
         }
 
+        // The preferred job lane may have become empty after selection. Give
+        // eligible extraction its turn before considering idle-only work.
+        if !extraction_first {
+            if stop_for_exhausted_once_budget(&run_budget, Instant::now()) {
+                break;
+            }
+            if crate::extraction_worker::run_next(
+                &lease_owner,
+                JOB_LEASE_SECS,
+                EXTRACTION_TASK_TIMEOUT_SECS,
+            )
+            .await?
+            {
+                run_budget.record_work_items(1);
+                continue;
+            }
+        }
+
         let enrichment_now = Instant::now();
         if retrieval_enrichment_schedule.is_due(enrichment_now) {
             let outcome = crate::memory::retrieval_enrichment::run_idle_retrieval_enrichment(
@@ -569,10 +593,6 @@ pub async fn run(once: bool, idle_sleep_ms: u64) -> Result<()> {
         continue;
     }
 
-    if !once {
-        let conn = db::open_db()?;
-        record_worker_heartbeat(&conn, &lease_owner, started_at_epoch)?;
-    }
     crate::log::info("worker", "stopped");
     Ok(())
 }

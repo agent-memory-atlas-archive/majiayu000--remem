@@ -31,6 +31,7 @@ pub(super) fn query_monthly(conn: &Connection, project: &str) -> Result<Vec<Mont
                 observations: 0,
                 sessions: 0,
                 ai_cost: 0.0,
+                ai_usage_coverage: Default::default(),
             })
             .observations = observations;
     }
@@ -55,6 +56,7 @@ pub(super) fn query_monthly(conn: &Connection, project: &str) -> Result<Vec<Mont
                 observations: 0,
                 sessions: 0,
                 ai_cost: 0.0,
+                ai_usage_coverage: Default::default(),
             })
             .sessions = sessions;
     }
@@ -62,25 +64,30 @@ pub(super) fn query_monthly(conn: &Connection, project: &str) -> Result<Vec<Mont
     let mut p3: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     let (pf3, _) = push_project_filter("project", project, 1, &mut p3);
     let refs3 = to_sql_refs(&p3);
+    let coverage = crate::db::query::ai_usage_coverage_select(conn)?;
     let mut stmt3 = conn.prepare(&format!(
         "SELECT strftime('%Y-%m', created_at_epoch, 'unixepoch') AS month, \
-         COALESCE(SUM(estimated_cost_usd), 0.0) FROM ai_usage_events WHERE {} GROUP BY month",
+         COALESCE(SUM(estimated_cost_usd), 0.0), {coverage} FROM ai_usage_events WHERE {} GROUP BY month",
         pf3
     ))?;
     let cost_rows = stmt3.query_map(refs3.as_slice(), |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, f64>(1)?,
+            crate::db::query::ai_usage_coverage_from_row(row, 2)?,
+        ))
     })?;
     for row in cost_rows {
-        let (month, ai_cost) = row?;
-        months
-            .entry(month.clone())
-            .or_insert(MonthRow {
-                month,
-                observations: 0,
-                sessions: 0,
-                ai_cost: 0.0,
-            })
-            .ai_cost = ai_cost;
+        let (month, ai_cost, ai_usage_coverage) = row?;
+        let entry = months.entry(month.clone()).or_insert(MonthRow {
+            month,
+            observations: 0,
+            sessions: 0,
+            ai_cost: 0.0,
+            ai_usage_coverage: Default::default(),
+        });
+        entry.ai_cost = ai_cost;
+        entry.ai_usage_coverage = ai_usage_coverage;
     }
 
     let mut result: Vec<MonthRow> = months.into_values().collect();

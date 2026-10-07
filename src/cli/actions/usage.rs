@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 
-use crate::db::{self, AiUsageBreakdown, AiUsageSourceTotals, AiUsageTotals};
+use crate::db::{self, AiUsageBreakdown, AiUsageCoverage, AiUsageSourceTotals, AiUsageTotals};
 
 const SECS_PER_DAY: i64 = 86_400;
 const SECS_PER_WEEK: i64 = 7 * SECS_PER_DAY;
@@ -28,7 +28,7 @@ pub(in crate::cli) fn run_usage(project: Option<&str>, days: i64, weeks: i64) ->
     }
     println!();
     print_totals(&format!("Last {weeks} weeks"), &totals);
-    print_precision(&source_totals);
+    print_precision(&totals.coverage);
     println!();
     print_source_totals(&source_totals);
     println!();
@@ -41,57 +41,27 @@ pub(in crate::cli) fn run_usage(project: Option<&str>, days: i64, weeks: i64) ->
     Ok(())
 }
 
-fn print_precision(rows: &[AiUsageSourceTotals]) {
-    if rows.is_empty() {
-        return;
-    }
-
-    let estimated_calls: i64 = rows
-        .iter()
-        .filter(|row| row.usage_source == "text_estimate")
-        .map(|row| row.calls)
-        .sum();
-    let exact_calls: i64 = rows
-        .iter()
-        .filter(|row| row.usage_source != "text_estimate")
-        .map(|row| row.calls)
-        .sum();
-    let estimated_tokens: i64 = rows
-        .iter()
-        .filter(|row| row.usage_source == "text_estimate")
-        .map(|row| row.total_tokens)
-        .sum();
-    let estimated_cost: f64 = rows
-        .iter()
-        .filter(|row| row.usage_source == "text_estimate")
-        .map(|row| row.estimated_cost_usd)
-        .sum();
-    let exact_tokens: i64 = rows
-        .iter()
-        .filter(|row| row.usage_source != "text_estimate")
-        .map(|row| row.total_tokens)
-        .sum();
-    let exact_cost: f64 = rows
-        .iter()
-        .filter(|row| row.usage_source != "text_estimate")
-        .map(|row| row.estimated_cost_usd)
-        .sum();
-
+fn print_precision(coverage: &AiUsageCoverage) {
     println!(
-        "  Usage precision:       {:>12} exact/provider/log calls, {:>12} text-estimate calls",
-        exact_calls, estimated_calls
+        "  Usage evidence:        {} complete, {} partial, {} missing, {} invalid",
+        coverage.complete_calls,
+        coverage.partial_calls,
+        coverage.missing_calls,
+        coverage.invalid_calls
     );
     println!(
-        "  Accounted sources:     {:>12} provider/log tokens (${:<9.4}), {:>12} text-estimated tokens (${:<9.4})",
-        exact_tokens, exact_cost, estimated_tokens, estimated_cost
+        "  Other evidence:        {} text-estimated, {} legacy-unverified, {} failed attempts",
+        coverage.estimated_calls, coverage.legacy_unverified_calls, coverage.failed_calls
     );
-    if estimated_tokens > 0 {
-        println!(
-            "  Precision note:        text_estimate is prompt/output length only, not provider invoice data"
-        );
-        println!(
-            "  Host-side blind spot:  Claude Code project memory, system context, and cache usage are not visible here"
-        );
+    println!(
+        "  Cost coverage:         {} incomplete calls, including {} unpriced",
+        coverage.cost_incomplete_calls, coverage.unpriced_calls
+    );
+    println!(
+        "  Cost figures:          known priced portions of local estimates, not provider invoices"
+    );
+    if coverage.estimated_calls > 0 {
+        println!("  Precision note:        text_estimate uses prompt/output length; host context and cache are unavailable");
     }
 }
 
@@ -103,17 +73,18 @@ fn print_source_totals(rows: &[AiUsageSourceTotals]) {
     }
 
     println!(
-        "  {:<18} {:<18} {:>7} {:>12} {:>10}",
-        "Source", "Pricing", "Calls", "Total", "Cost"
+        "  {:<18} {:<18} {:>7} {:>12} {:>10} {:>10}",
+        "Source", "Pricing", "Calls", "Total", "Known cost", "Incomplete"
     );
     for row in rows {
         println!(
-            "  {:<18} {:<18} {:>7} {:>12} ${:>9.4}",
+            "  {:<18} {:<18} {:>7} {:>12} ${:>9.4} {:>10}",
             compact_cell(&row.usage_source, 18),
             compact_cell(&row.pricing_source, 18),
             row.calls,
             row.total_tokens,
-            row.estimated_cost_usd
+            row.estimated_cost_usd,
+            row.coverage.cost_incomplete_calls
         );
     }
 }
@@ -126,20 +97,21 @@ fn print_usage_breakdown(weeks: i64, rows: &[AiUsageBreakdown]) {
     }
 
     println!(
-        "  {:<32} {:<11} {:<15} {:<15} {:>7} {:>12} {:>10}",
-        "Project", "Executor", "Source", "Pricing", "Calls", "Total", "Cost"
+        "  {:<32} {:<11} {:<15} {:<15} {:>7} {:>12} {:>10} {:>10}",
+        "Project", "Executor", "Source", "Pricing", "Calls", "Total", "Known cost", "Incomplete"
     );
     for row in rows {
         let project = row.project.as_deref().unwrap_or("<none>");
         println!(
-            "  {:<32} {:<11} {:<15} {:<15} {:>7} {:>12} ${:>9.4}",
+            "  {:<32} {:<11} {:<15} {:<15} {:>7} {:>12} ${:>9.4} {:>10}",
             compact_cell(project, 32),
             compact_cell(&row.executor, 11),
             compact_cell(&row.usage_source, 15),
             compact_cell(&row.pricing_source, 15),
             row.calls,
             row.total_tokens,
-            row.estimated_cost_usd
+            row.estimated_cost_usd,
+            row.coverage.cost_incomplete_calls
         );
     }
 }
@@ -180,7 +152,7 @@ fn print_totals(label: &str, totals: &AiUsageTotals) {
     println!("  Reasoning tokens:      {:>12}", totals.reasoning_tokens);
     println!("  Total tokens:          {:>12}", totals.total_tokens);
     println!(
-        "  Est. cost:             ${:>11.4}",
+        "  Known est. cost:       ${:>11.4}",
         totals.estimated_cost_usd
     );
 }
@@ -202,6 +174,7 @@ fn print_daily(days: i64, rows: &[db::DailyAiUsage]) {
             row.reasoning_tokens,
             row.total_tokens,
             row.estimated_cost_usd,
+            row.coverage.cost_incomplete_calls,
         );
     }
 }
@@ -223,14 +196,23 @@ fn print_weekly(weeks: i64, rows: &[db::WeeklyAiUsage]) {
             row.reasoning_tokens,
             row.total_tokens,
             row.estimated_cost_usd,
+            row.coverage.cost_incomplete_calls,
         );
     }
 }
 
 fn print_header(label: &str) {
     println!(
-        "  {:<12} {:>7} {:>11} {:>11} {:>11} {:>11} {:>12} {:>10}",
-        label, "Calls", "Input", "Cache", "Output", "Reasoning", "Total", "Cost"
+        "  {:<12} {:>7} {:>11} {:>11} {:>11} {:>11} {:>12} {:>10} {:>10}",
+        label,
+        "Calls",
+        "Input",
+        "Cache",
+        "Output",
+        "Reasoning",
+        "Total",
+        "Known cost",
+        "Incomplete"
     );
 }
 
@@ -243,9 +225,10 @@ fn print_row(
     reasoning_tokens: i64,
     total_tokens: i64,
     estimated_cost_usd: f64,
+    incomplete_calls: i64,
 ) {
     println!(
-        "  {:<12} {:>7} {:>11} {:>11} {:>11} {:>11} {:>12} ${:>9.4}",
+        "  {:<12} {:>7} {:>11} {:>11} {:>11} {:>11} {:>12} ${:>9.4} {:>10}",
         label,
         calls,
         input_tokens,
@@ -253,6 +236,7 @@ fn print_row(
         output_tokens,
         reasoning_tokens,
         total_tokens,
-        estimated_cost_usd
+        estimated_cost_usd,
+        incomplete_calls
     );
 }

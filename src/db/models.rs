@@ -144,6 +144,7 @@ pub struct DailyAiUsage {
     pub cache_read_tokens: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: f64,
+    pub coverage: AiUsageCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +158,7 @@ pub struct WeeklyAiUsage {
     pub cache_read_tokens: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: f64,
+    pub coverage: AiUsageCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +171,7 @@ pub struct AiUsageTotals {
     pub cache_read_tokens: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: f64,
+    pub coverage: AiUsageCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +181,7 @@ pub struct AiUsageSourceTotals {
     pub calls: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: f64,
+    pub coverage: AiUsageCoverage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -189,4 +193,25 @@ pub struct AiUsageBreakdown {
     pub calls: i64,
     pub total_tokens: i64,
     pub estimated_cost_usd: f64,
+    pub coverage: AiUsageCoverage,
+}
+
+/// Coverage accompanies the known priced portion; it is not an invoice.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AiUsageCoverage {
+    pub complete_calls: i64,
+    pub partial_calls: i64,
+    pub missing_calls: i64,
+    pub invalid_calls: i64,
+    pub estimated_calls: i64,
+    pub legacy_unverified_calls: i64,
+    pub failed_calls: i64,
+    pub unpriced_calls: i64,
+    pub cost_incomplete_calls: i64,
+}
+
+impl AiUsageCoverage {
+    pub fn cost_complete(&self) -> bool {
+        self.cost_incomplete_calls == 0
+    }
 }

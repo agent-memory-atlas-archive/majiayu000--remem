@@ -22,6 +22,7 @@ const TASK_BOUND_TABLES: &[&str] = &[
     "projects",
     "sessions",
     "workspaces",
+    "worker_dispatch_state",
 ];
 const ALLOWED_METADATA_TABLES: &[&str] = &[
     "_schema_migrations",
@@ -53,6 +54,7 @@ pub(super) fn validate_closed_world(
     reject_unexpected_business_rows(connection)?;
     validate_identity_roots(connection, &task.id)?;
     validate_task_rows(connection, task, expected_event_count)?;
+    validate_worker_dispatch_state(connection, task)?;
     validate_metadata(connection)?;
     Ok(())
 }
@@ -225,6 +227,77 @@ fn validate_task_rows(
            AND t.task_kind IN ('observation_extract', 'memory_candidate', 'graph_candidate')",
         &task.id,
     )?;
+    Ok(())
+}
+
+fn validate_worker_dispatch_state(connection: &Connection, task: &MemoryBenchTask) -> Result<()> {
+    let policy = task.policy.as_ref().context("security task lacks policy")?;
+    let candidate_claimed = policy.explicit_approval || policy.poisoning_quarantine_expected;
+    // Identity roots and task membership have already been checked. Derive the
+    // ledger's IDs from that session, rather than assuming migration seed IDs.
+    let (host, project): (i64, i64) = connection.query_row(
+        "SELECT host_id, project_id FROM sessions WHERE session_id = ?1",
+        [&task.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let (host, project) = (host.to_string(), project.to_string());
+    // The production security pipeline claims observation, optionally claims
+    // candidate, and leaves any graph follow-up pending. Ready registration
+    // freezes each group's first sequence; only a claim advances the queue.
+    let mut expected = vec![
+        (
+            "extraction".to_string(),
+            "observation_extract".to_string(),
+            host.clone(),
+            project.clone(),
+            0,
+            Some(1),
+        ),
+        (
+            "queue".to_string(),
+            "extraction".to_string(),
+            String::new(),
+            String::new(),
+            0,
+            Some(if candidate_claimed { 2 } else { 1 }),
+        ),
+    ];
+    if candidate_claimed {
+        expected.push((
+            "extraction".to_string(),
+            "memory_candidate".to_string(),
+            host,
+            project,
+            1,
+            Some(2),
+        ));
+    }
+    expected.sort();
+    ensure!(
+        table_row_count(connection, "worker_dispatch_state")? == expected.len() as i64,
+        "closed-world snapshot inventory worker_dispatch_state row count differs from typed task claim history"
+    );
+    let mut statement = connection.prepare(
+        "SELECT scope, stage, host, project, ready_sequence, last_claim_sequence
+         FROM worker_dispatch_state ORDER BY scope, stage, host, project",
+    )?;
+    let actual = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .context("read task-bound worker_dispatch_state")?;
+    ensure!(
+        actual == expected,
+        "closed-world snapshot inventory worker_dispatch_state differs from typed task claim history"
+    );
     Ok(())
 }
 

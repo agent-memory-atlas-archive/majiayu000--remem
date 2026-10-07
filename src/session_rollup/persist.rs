@@ -278,6 +278,35 @@ pub(super) fn load_persisted_rollup_state(
     }))
 }
 
+pub(super) fn persisted_rollup_prefix_end(
+    conn: &Connection,
+    task: &db::ExtractionTask,
+) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT s.covered_to_event_id FROM session_summaries s
+         WHERE s.session_row_id IS ?1 AND s.host_id = ?2 AND s.project_id = ?3
+           AND s.covered_from_event_id = (
+               SELECT MIN(id) FROM captured_events
+               WHERE session_row_id IS ?1 AND host_id = ?2 AND project_id = ?3
+                 AND id > ?4 AND id <= ?5)
+           AND s.covered_to_event_id BETWEEN s.covered_from_event_id AND ?5
+           AND EXISTS (SELECT 1 FROM captured_events e
+               WHERE e.id = s.covered_to_event_id AND e.session_row_id IS ?1
+                 AND e.host_id = ?2 AND e.project_id = ?3)
+         ORDER BY s.covered_to_event_id ASC, s.id ASC LIMIT 1",
+        params![
+            task.session_row_id,
+            task.host_id,
+            task.project_id,
+            task.cursor_event_id.unwrap_or(0),
+            task.high_watermark_event_id
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 pub(super) fn mark_raw_archive_completed(
     conn: &Connection,
     task: &db::ExtractionTask,

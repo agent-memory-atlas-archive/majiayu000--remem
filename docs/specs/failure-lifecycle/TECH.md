@@ -65,6 +65,43 @@ Classification maps existing error strings at failure-marking time:
 The mapping table lives in one module with unit tests per pattern, so new
 error strings get classified in one place.
 
+### 1.1 Generated output versus source failures (Refs #1105)
+
+Current extraction parsers wrap only validation of newly generated text in a
+typed `ModelOutputError`, carrying its `ExtractionTaskKind` and original error.
+The worker classifies the error before formatting it for storage: that typed
+error is transient even when its diagnostic includes `malformed`, `schema`, or
+`missing evidence`. Loading stored source rows and applying database mutations
+remain outside this wrapper and retain the existing permanent/string fallback.
+The wrapper is applied at the generation-consumer boundary, not to arbitrary
+provider, persistence, or entire task errors.
+
+Lease-owned extraction retry/exhaustion passes the resolved `FailureClass`
+explicitly through the task and replay-range writes. Reformatting an error must
+not change its persisted class. Existing string-based entry points stay
+compatible for legacy/admin callers. Normal retry counts/backoff, exhaustion
+cursor advancement, raw retention, replay eligibility, and archived exact replay
+acknowledgement are unchanged. Strict validation remains fail-closed; retries
+never persist partially parsed output.
+
+Focused tests must prove that an output-schema failure preserves the cursor and
+raw evidence on the first attempt, that repeated failures exhaust into a
+transient replay range at the existing cap, and that an unwrapped malformed
+source failure remains permanent. Parser-consumer tests bind the typed marker
+to real generated-response errors rather than relying only on synthetic error
+strings.
+
+### 1.2 Cross-platform worker liveness (Refs #1105)
+
+Heartbeat freshness and OS process liveness are both required for health.
+Windows uses a query/synchronization-only process handle and a zero-timeout
+wait; it must not treat an arbitrary positive PID as alive. Once a startup
+heartbeat is recorded, an owner/PID-scoped guard clears that row's `pid` on
+normal return, error, and cancellation/unwind, without rewriting its last
+diagnostic timestamp or affecting another worker's row. Process termination
+that cannot run the guard remains covered by OS liveness and the existing
+lease-expiration recovery; no new database table or background timer is added.
+
 ### 2. Bounded auto-recovery
 
 Worker loop extension (no new daemon): once per cycle, pick up to N
@@ -180,7 +217,102 @@ archived source; no pending work may retain an archived marker.
   canonical rollback while proving independently committed unrelated rows
   continue to make progress.
 
-### 2.1 Job queue persisted truth and v069 lifecycle inputs
+### 2.1 Bounded captured input and verified chunk progress (Refs #1105)
+
+`observation_extract` and `session_rollup` first select at most 64 event IDs from
+their same-host/project/session pending range, in ascending ID order. They narrow
+the in-memory attempted watermark before loading source payloads. Prompt building
+may remove only a suffix until actual system plus serialized user text plus a
+4096-byte provider-wrapper reserve fits 256 KiB. The database task's coalesced
+high watermark remains the full pending target. The attempted watermark flows to
+success, failure, defer, timeout, and exhaustion handling. A single oversized
+event/context fails before invoking the model; no whole-input truncation may
+claim unseen source IDs as completed. Per-event clipping is marked in prompt
+metadata and logged with the attempted range, without logging captured content.
+
+v094 adds nullable `extraction_tasks.completed_event_id` and
+`replay_from_event_id`. The first contains only the latest successfully persisted
+chunk boundary; migration leaves every historical row NULL because exhaustion
+has historically advanced `cursor_event_id` over failed evidence. The second
+records an immutable original lower bound for each new replay or linked follow-up
+task, independently of its mutable cursor and coalesced upper bound. Historical
+canonical tasks derive the lower bound from the explicitly linked parent range.
+Historical bounded tasks require a complete deterministic-key grammar roundtrip,
+matching kind, scope, parent range and upper bound, and real in-scope endpoints;
+ordinary historical replay-follow-up keys use their original parent lower bound.
+Unverifiable identity or bounds reject recovery with no committed writes. No path
+infers successful progress or an original lower bound from a historical cursor.
+Normal completion and exact intermediate chunk checkpoint use
+an IMMEDIATE transaction, validate processing state, expected owner and unexpired
+lease, validate the boundary against task scope and range, and update cursor and
+successful progress together. A stale worker may not overwrite a replacement
+owner. Canonical replay checkpoints additionally require the same replay range,
+task kind, host, workspace, project, session, full target watermark, and an
+in-scope captured event. Linked follow-ups may have a different kind and a
+smaller contained range, including during exact recovery. Their completion
+validates the same host/workspace/project/session, immutable lower bound,
+contained cursor/target and captured boundary. A failed parent range
+may accept completion of already-leased effects but cannot become replayed until
+an explicit recovery requeues it and all linked work is done.
+Canonical re-enqueue inherits progress only from that range's linked, validated
+old primary task. Existing successors are restored explicitly from their own
+verified checkpoint; NULL starts at that member's original lower bound. A new
+parent chunk must not replace a failed child's cursor with the parent cursor.
+Failed replay tasks retain their last successful cursor instead of skipping a
+failed chunk. When a repeated ordinary producer finds an existing bounded task
+already linked to a replay range, that existing member's validated checkpoint
+and original bounds govern revival; the ordinary producer's old cursor cannot
+reset replay progress. Archived or quarantined members fail closed with their
+task/range identity and retain their archive until explicit governed recovery.
+
+Retry selection, count, dry-run, explicit mutation and automatic maintenance
+recognize one narrow pending-member exception: an unleased, noncanonical
+`graph_candidate` in the same range, with validated identity/bounds, blocked by
+an unleased failed `memory_candidate` in that range and scope whose target covers
+the graph target but whose cursor has not reached it. This permits recovery of
+the failed prerequisite without inventing progress or depending on a Waiting
+task to exhaust its retry budget. Every family member still validates before any
+write; processing rows, foreign owners, unrelated pending tasks and pending
+canonical tasks reject admission. Ordinary recovery preserves the admitted
+pending graph's attempts and `next_retry_epoch`; exact admission rejects a
+future retry time and otherwise claims it under the same explicit family lease.
+Quarantine retains the stricter no-pending/no-processing predicate, and human
+review waits are not an automatic-recovery exception.
+
+Required processor effects finish before the success transaction. The existing
+summary/transcript/raw-archive checkpoint still supports idempotent recovery of
+already-written rollups without rereading a missing transcript. A legacy persisted
+rollup larger than the new input limit recovers its existing checkpoint without a
+new model call. Only new generation is split into the bounded prefix. Artifact writes,
+candidate promotion, files, and final task checkpoint are not one atomic commit;
+the contract is at-least-once. A crash in that window replays the existing
+idempotent effects. Exact replay atomically admits the existing family, then
+processes members sequentially inside one resolved profile, task-local suppression
+of all new follow-ups, common lease deadline and overall 420-second timeout.
+Admission validates every existing linked member before making any row pending;
+another owner, invalid identity or unverifiable bounds rolls back the whole
+attempt. Completed chunks and members retain their lease until family completion
+or archive. The parent becomes replayed only after every required existing member
+reaches its own target. Failure or expired exact ownership atomically archives
+unfinished members owned by this attempt, retains completed members and all
+verified checkpoints, and preserves the canonical task pointer and original
+parent endpoints. Bounded error evidence identifies the actual member/chunk.
+
+v094 is schema-only and performs no historical cursor/checkpoint backfill or
+unrelated rewrite. Recovery may materialize a strictly validated historical
+original lower bound; it never fabricates successful progress. Old inserts omit
+the nullable columns safely. Deployments must upgrade
+all workers before relying on resumable progress; mixed-version execution and
+in-place schema downgrade are unsupported. Rollback uses a pre-upgrade database
+backup with the matching binary, or a forward fix. Dropping or fabricating the
+checkpoint or lower bound to bypass recovery is not a rollback procedure.
+Migration tests cover preserved legacy rows, both NULL defaults, reruns, and
+missing-column drift; synthetic DB tests cover scope/lease rejection, partial
+success, failed chunks, parent-success/child-failure recovery, bounded historical
+identities, whole-family admission rollback and exact timeout after a successful
+member, without historical cursor inference or ordinary daemon escape.
+
+### 2.2 Job queue persisted truth and v069 lifecycle inputs
 
 Lease-owned done, retry, exhausted, and permanent-failure transitions use the
 current processing row, expected owner, and unexpired lease as a single
@@ -211,6 +343,38 @@ section 5. The v057 upgrade deliberately initializes pre-existing failed rows
 as exhausted to avoid a retry storm; v069 creates new conflict evidence and
 must preserve each source row's actual attempt count. Neither rule changes the
 retention, cleanup, or aggregate-history policy below.
+
+### 2.3 Persisted stage and project dispatch (Refs #1105)
+
+v095 creates `worker_dispatch_state`, an operational scheduling table keyed by
+queue or by queue/stage/host/project. It contains a frozen first-ready sequence
+and a nullable last-claim sequence, without source payloads or model state. Before
+ordinary claim selection, an IMMEDIATE transaction registers all currently
+eligible groups at the current global claim sequence. Selection orders by
+`COALESCE(last_claim_sequence, ready_sequence)`, then never-claimed first, then
+existing priority/creation/id tie-breaks. Recording first readiness prevents a
+stream of new groups from resetting waiting order. Capture/coalescing never
+refreshes service history. A successful claim atomically increments the sequence
+and records both its queue and stage/host/project group; rollback or an empty
+claim cannot consume a turn.
+
+The worker uses the same persisted sequence to select the extraction or ordinary
+job lane and falls back if the selected lane became empty. Shared eligibility
+SQL excludes future retries, cleanup from the ordinary job lane, and blocked
+CompileRules successors. Groups not currently ready never enter candidate order.
+Cleanup retains its separate early lane; idle-only work and the four-item /
+180-second once admission remain unchanged. Explicit exact replay bypasses fair
+selection and does not alter ordinary service history. Within a stage/project
+group, task priority/age remains the existing policy; this change does not claim
+fair per-session CPU time or preempt a running provider call.
+
+v095 is schema-only, starts with an empty scheduler ledger, and preserves all
+business task/job rows. Older binaries may ignore this additive table but cannot
+provide the new fairness guarantee; all active workers must use the new binary.
+Rollback follows the v094 backup/forward-fix rule. Pure SQLite fixtures cover a
+continuously coalescing high-priority source, older downstream work and another
+project, sustained new-group arrival, queue alternation across reopen, excluded
+groups, exact isolation, and rollback of claim plus dispatch metadata together.
 
 ### 3. Retention / archiving
 
@@ -318,20 +482,21 @@ reviving the old queue or creating an upgrade-time retry storm.
 - `remem worker --once --replay-range-id <positive-id>
   --acknowledge-quarantine --include-archived --profile <name>` validates the
   profile and acquires the worker singleton before changing the range. While
-  holding the lock, one SQLite transaction revalidates the exact range,
-  requeues it, and claims the returned replay task with the ordinary
-  pending/retry-due predicate; the pending row is never committed without the
-  exact lease. A held daemon lock, future retry time, or identity race fails
-  before fallback. The exact processor uses the validated in-memory profile
-  for its single attempt. Full-range done follows the normal success
-  transition; partial coverage, defer, wait, timeout, provider error, or
-  another non-success atomically leaves the
-  replay task failed/archived and the range quarantined/archived. Expired lease
+  holding the lock, one IMMEDIATE SQLite transaction revalidates the exact range
+  and all existing linked tasks, restores each unfinished member from its own
+  checkpoint/original bound, and claims the admitted family. No pending member
+  is committed without the exact lease. A held daemon lock, future retry time,
+  foreign owner or identity race fails before fallback. The exact processor uses
+  the validated in-memory profile for its single family attempt and one total
+  420-second timeout. Full-family completion follows the normal success
+  transition after all bounded chunks; defer, wait, timeout, provider error, or
+  another non-success atomically archives unfinished owned members, preserves
+  successful members and checkpoints, and quarantines/archives the range. Expired lease
   recovery recognizes exact-replay owners and applies the same archived
   quarantine outcome, so interruption never creates daemon-claimable work with
-  a default profile. This mode does not run lifecycle maintenance, priority
-  fallback, jobs, embedding backfill, or a second extraction task; ordinary
-  worker modes keep their existing drain behavior.
+  a default profile. This mode creates no new follow-up tasks and does not run
+  lifecycle maintenance, priority fallback, jobs, embedding backfill, or unrelated
+  extraction work; ordinary worker modes keep their existing drain behavior.
 - `remem pending list-failed` / `retry-extraction-ranges` keep working; the
   latter can validate an archived extraction range only by exact ID with
   `--include-archived --dry-run`; the locked exact worker is the sole mutating

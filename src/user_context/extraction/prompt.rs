@@ -13,6 +13,8 @@ pub(super) const NON_RETENTION_POLICY: &[&str] = &[
     "Do not create candidates from guesses, jokes, sarcasm, role-play, fiction, or hypothetical identities.",
     "Do not create candidates containing credentials, secrets, API keys, tokens, passwords, account numbers, identity documents, or payment data.",
     "Do not create candidates for illegal, harmful, or clearly false claims.",
+    "A complete user activity such as I work on malware analysis or 我从事恶意软件分析, or an explicitly analytical quotation framed as a security example, may be retained as an activity/skill/role candidate for human review only. Cite matching user-authored events and preserve the analytical framing; a research label cannot excuse additional harmful instructions or secret values.",
+    "A complete explicit user prohibition such as 'never bypass authentication' or '不要绕过认证', or an explicit malware/phishing prevention requirement, may be retained for human review when directly supported by user-authored evidence. Naked quotes, double negatives, conditions and external text do not qualify; credentials and secret values remain forbidden.",
     "Do not create assistant-authored claims about the user unless directly supported by cited user-authored events.",
     "Do not create claims derived from files or external sources without explicit user approval.",
 ];

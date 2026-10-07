@@ -550,17 +550,19 @@ fn build_query_search_plan(
                 metadata,
             } = query_embedding;
             let vector_start = Instant::now();
-            let mut vector_outcome = crate::retrieval::vector::vector_search_embedding_filtered(
-                conn,
-                &embedding,
-                crate::retrieval::vector::VectorSearchFilters {
-                    project,
-                    memory_type,
-                    branch,
-                    include_stale,
-                },
-                fetch as usize,
-            )?;
+            let mut vector_outcome =
+                crate::retrieval::vector::vector_search_embedding_filtered_with_suppression_policy(
+                    conn,
+                    &embedding,
+                    crate::retrieval::vector::VectorSearchFilters {
+                        project,
+                        memory_type,
+                        branch,
+                        include_stale,
+                    },
+                    include_suppressed,
+                    fetch as usize,
+                )?;
             push_elapsed(&mut timings, "vector", vector_start);
             timings.append(&mut vector_outcome.timings);
             let channel = if let Some(reason) = vector_outcome.disabled_reason {

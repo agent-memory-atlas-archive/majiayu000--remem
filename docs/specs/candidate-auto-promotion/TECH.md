@@ -1,9 +1,41 @@
 # Candidate Auto-Promotion Technical Contract
 
 Status: Current contract
-Date: 2026-08-03
 
-Tracking: #955
+Date: 2026-08-03; evidence reassessment amendment: 2026-10-06
+
+Tracking: #955, #1105
+
+## Content identity and evidence reassessment (GH-1105)
+
+Ordinary candidate deduplication distinguishes exact source replay from a new
+evidence snapshot. Under the candidate persistence transaction, it loads all
+matching content identities. Only automatically created observation/summary
+`pending_review` rows with no review, quarantine, acknowledgement, active-memory,
+or activation binding can be replaced by new evidence. Previously system-replaced
+rows participate in the seen-evidence set; they never erase a later human terminal
+decision. Event identities are compared as positive integer sets, so ordering
+does not affect idempotency. The incoming set must introduce a trusted event,
+remain at least as trusted and confident as the pending snapshot, and pass the
+same source, routing, risk, and poisoning gates as every new candidate.
+
+The writer uses an immediate transaction before identity and suppression reads.
+It writes a fresh candidate, then marks prior pending versions `discarded` with
+`review_action_source='candidate_evidence_superseded'`, an exact replacement id
+and evidence digest, and a version-checked update. Original evidence/payloads and
+activation receipts are never rewritten. A failed promotion, audit, or version
+check rolls the entire replacement back. Topic/pattern/entity suppression and
+matching suppressed memory identities veto reassessment. Preference reinforcement
+keeps its current evidence-aware path; native/Dream/pack identities are ineligible.
+
+Operational-state TTL renewal remains a separate existing lifecycle path. An
+untouched `auto_promoted` observation/summary row whose TTL has elapsed may be
+renewed; a legacy unattributed automatic row missing TTL retains its existing
+upgrade path. Such rows are not rewritten or system-discarded. Their old event
+identities still count as seen, so renewal needs a new trusted event and at
+least the old confidence/trust. Their completed activation does not veto this
+fresh renewal, while any human terminal row, quarantine, or applicable
+suppression does. The ordinary lifecycle planner records memory replacement.
 
 ## Risk Rubric
 
@@ -74,6 +106,8 @@ imperatives outside the fixed scanner vocabulary.
 
 ## Verification
 
+- `cargo test --lib memory_candidate::tests::reassessment`
+- `cargo test --lib memory_candidate::tests::ttl`
 - `cargo test memory_candidate::tests_autopromote`
 - `cargo test memory_candidate::tests_autopromote_gh955`
 - `cargo test eval::extraction`

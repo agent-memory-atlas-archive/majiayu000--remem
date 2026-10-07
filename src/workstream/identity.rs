@@ -1,5 +1,6 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
 
 pub(super) const MATCH_REASON_SESSION_LINK: &str = "session_link";
 pub(super) const MATCH_REASON_ALIAS_EXACT: &str = "alias_exact";
@@ -66,7 +67,7 @@ pub(super) fn title_has_continuity(left: &str, right: &str) -> bool {
     if left.is_empty() || right.is_empty() {
         return false;
     }
-    if left == right || left.contains(&right) || right.contains(&left) {
+    if left == right {
         return true;
     }
 
@@ -77,12 +78,37 @@ pub(super) fn title_has_continuity(left: &str, right: &str) -> bool {
     let right_tokens = meaningful_tokens(&right);
     let shared = right_tokens
         .iter()
-        .filter(|token| left_tokens.iter().any(|candidate| candidate == *token))
+        .filter(|token| left_tokens.contains(**token))
         .collect::<Vec<_>>();
+    if !shared.is_empty()
+        && (contains_title_phrase(&left, &right) || contains_title_phrase(&right, &left))
+    {
+        return true;
+    }
     shared.len() >= 3
         || shared
             .iter()
             .any(|token| token_is_strong_continuity_anchor(token))
+}
+
+pub(super) fn title_is_specific(title: &str) -> bool {
+    normalize_title(title)
+        .split_whitespace()
+        .map(identity_token)
+        .any(|token| !BROAD_TOKENS.contains(&token) && token.chars().any(char::is_alphanumeric))
+}
+
+fn identity_token(token: &str) -> &str {
+    token.trim_matches(|ch: char| !ch.is_alphanumeric())
+}
+
+fn contains_title_phrase(container: &str, phrase: &str) -> bool {
+    let container: Vec<_> = container.split_whitespace().collect();
+    let phrase: Vec<_> = phrase.split_whitespace().collect();
+    !phrase.is_empty()
+        && container
+            .windows(phrase.len())
+            .any(|window| window == phrase)
 }
 
 pub(super) fn workstream_identity_key(
@@ -188,9 +214,10 @@ pub(super) fn has_continuity_alias(
     Ok(false)
 }
 
-fn meaningful_tokens(normalized: &str) -> Vec<&str> {
+fn meaningful_tokens(normalized: &str) -> BTreeSet<&str> {
     normalized
         .split_whitespace()
+        .map(identity_token)
         .filter(|token| !BROAD_TOKENS.contains(token))
         .filter(|token| !token.is_ascii() || token.len() >= 4)
         .collect()
@@ -202,7 +229,7 @@ fn token_is_strong_continuity_anchor(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_title, title_has_continuity};
+    use super::{normalize_title, title_has_continuity, title_is_specific};
 
     #[test]
     fn title_normalization_collapses_separator_noise() {
@@ -210,6 +237,33 @@ mod tests {
             normalize_title(" flowguard / run-guard Skill "),
             "flowguard run guard skill"
         );
+    }
+
+    #[test]
+    fn broad_substrings_and_repeated_tokens_are_not_continuity() {
+        for (left, right) in [
+            ("Preview animation", "review"),
+            ("Billing review", "review"),
+            ("Security review", "review"),
+            ("Billing review!", "review!"),
+            ("Billing \"review\"", "\"review\""),
+            ("Billing “review”", "“review”"),
+            (
+                "billing export cleanup",
+                "billing billing billing dashboard",
+            ),
+            ("cache import migration", "cache cache cache invalidation"),
+        ] {
+            assert!(!title_has_continuity(left, right), "{left:?} -> {right:?}");
+            assert!(!title_has_continuity(right, left), "{right:?} -> {left:?}");
+        }
+        assert!(title_has_continuity(
+            "Billing export",
+            "Billing export cleanup"
+        ));
+        for broad in ["review!", "review?", "\"review\"", "“review”", "#review"] {
+            assert!(!title_is_specific(broad), "{broad}");
+        }
     }
 
     #[test]

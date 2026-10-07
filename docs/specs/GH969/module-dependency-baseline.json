@@ -478,18 +478,6 @@
     },
     {
       "source": "db",
-      "target": "ai",
-      "sites": [
-        {
-          "path": "src/db/usage.rs",
-          "kind": "use",
-          "signature": "usecrate::ai::TokenUsage;",
-          "occurrence": 1
-        }
-      ]
-    },
-    {
-      "source": "db",
       "target": "memory",
       "sites": [
         {
@@ -1145,12 +1133,6 @@
           "kind": "path",
           "signature": "crate::adapter",
           "occurrence": 1
-        },
-        {
-          "path": "src/session_rollup/prompt.rs",
-          "kind": "path",
-          "signature": "crate::adapter",
-          "occurrence": 2
         },
         {
           "path": "src/session_rollup/transcript_evidence.rs",

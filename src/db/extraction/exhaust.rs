@@ -15,11 +15,13 @@ pub(super) fn exhaust_extraction_task(
     lease_owner: &str,
     attempts: i64,
     err: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")
         .context("begin extraction exhaustion transaction")?;
-    let result = exhaust_extraction_task_locked(conn, task, lease_owner, attempts, err, now);
+    let result =
+        exhaust_extraction_task_locked(conn, task, lease_owner, attempts, err, failure_class, now);
     let (session_id, skipped_through, replay_range) = match result {
         Ok(output) => {
             conn.execute_batch("COMMIT")
@@ -45,7 +47,7 @@ pub(super) fn exhaust_extraction_task(
     crate::log::error(
         "extraction",
         &format!(
-            "task {} exhausted after {} attempts; session={} cursor advanced to {} with replay_range={} so later events stay extractable: {}",
+            "task {} exhausted after {} attempts; session={} attempted_through={} replay_range={}: {}",
             task.id,
             attempts,
             session_id.as_deref().unwrap_or("<unknown>"),
@@ -65,6 +67,7 @@ fn exhaust_extraction_task_locked(
     lease_owner: &str,
     attempts: i64,
     err: &str,
+    failure_class: crate::db::FailureClass,
     now: i64,
 ) -> Result<(Option<String>, i64, Option<i64>)> {
     let current = conn
@@ -73,8 +76,9 @@ fn exhaust_extraction_task_locked(
                     t.high_watermark_event_id, t.replay_range_id, s.session_id
              FROM extraction_tasks t
              LEFT JOIN sessions s ON s.id = t.session_row_id
-             WHERE t.id = ?1 AND t.lease_owner = ?2 AND t.status = 'processing'",
-            params![task.id, lease_owner],
+             WHERE t.id = ?1 AND t.lease_owner = ?2 AND t.status = 'processing'
+               AND t.lease_expires_epoch > ?3 AND t.cursor_event_id IS ?4",
+            params![task.id, lease_owner, now, task.cursor_event_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -102,10 +106,25 @@ fn exhaust_extraction_task_locked(
     else {
         bail!("extraction task {} is not leased by this worker", task.id);
     };
-    let replay_range_id = task.replay_range_id.or(replay_range_id);
+    anyhow::ensure!(
+        task.replay_range_id == replay_range_id
+            && task.task_kind.as_str() == task_kind
+            && task.host_id == host_id
+            && task.workspace_id == workspace_id
+            && task.project_id == project_id
+            && task.session_row_id == session_row_id,
+        "extraction task {} failure scope changed",
+        task.id
+    );
 
     let cursor = task.cursor_event_id.unwrap_or(0);
     let skipped_through = task.high_watermark_event_id.unwrap_or(cursor);
+    anyhow::ensure!(
+        skipped_through >= cursor
+            && current_high_watermark_event_id.is_none_or(|high| skipped_through <= high),
+        "extraction task {} failure boundary is invalid",
+        task.id
+    );
     let replay_range = if let Some(range_id) = replay_range_id {
         conn.execute(
             "UPDATE extraction_replay_ranges
@@ -120,7 +139,7 @@ fn exhaust_extraction_task_locked(
             params![
                 attempts,
                 crate::db::truncate_str(err, 2000),
-                crate::db::classify_failure(err).as_str(),
+                failure_class.as_str(),
                 now,
                 range_id
             ],
@@ -139,15 +158,20 @@ fn exhaust_extraction_task_locked(
             skipped_through,
             attempts,
             err,
+            failure_class,
             now,
         )?)
     } else {
         None
     };
 
-    let still_has_later_events = current_high_watermark_event_id
-        .map(|high_watermark| high_watermark > skipped_through)
-        .unwrap_or(false);
+    // An original source can quarantine this chunk and continue with new
+    // evidence. A replay must retain its successful prefix and fail as a whole;
+    // skipping a failed replay chunk would falsely certify the parent as done.
+    let still_has_later_events = replay_range_id.is_none()
+        && current_high_watermark_event_id
+            .map(|high_watermark| high_watermark > skipped_through)
+            .unwrap_or(false);
     let next_status = if still_has_later_events {
         "pending"
     } else {
@@ -171,9 +195,9 @@ fn exhaust_extraction_task_locked(
         params![
             next_status,
             next_attempts,
-            skipped_through,
+            if replay_range_id.is_some() { cursor } else { skipped_through },
             crate::db::truncate_str(err, 2000),
-            crate::db::classify_failure(err).as_str(),
+            failure_class.as_str(),
             now,
             task.id,
             lease_owner

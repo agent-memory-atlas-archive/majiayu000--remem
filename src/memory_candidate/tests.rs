@@ -1,3 +1,5 @@
+mod generated_output;
+
 use anyhow::Result;
 use rusqlite::{params, Connection};
 
@@ -10,6 +12,7 @@ mod existing_preferences;
 mod lesson_outcome;
 mod poisoning;
 mod preference_reinforcement;
+mod reassessment;
 mod spo_facts;
 mod ttl;
 
@@ -28,7 +31,7 @@ fn setup_task_with_project(
     session_id: &str,
     project: &str,
 ) -> Result<db::ExtractionTask> {
-    record_captured_event(
+    let captured = record_captured_event(
         conn,
         &CaptureEventInput {
             host: "codex-cli",
@@ -42,8 +45,20 @@ fn setup_task_with_project(
             task_kind: Some(ExtractionTaskKind::MemoryCandidate),
         },
     )?;
-    db::claim_next_extraction_task(conn, "worker-a", 60)?
-        .ok_or_else(|| anyhow::anyhow!("expected memory candidate task"))
+    // This is a candidate fixture, not a worker-dispatch test. Pending graph
+    // follow-ups may legitimately be selected before this new session.
+    let task_id = captured
+        .extraction_task_id
+        .ok_or_else(|| anyhow::anyhow!("capture should enqueue memory candidate task"))?;
+    let task = db::claim_extraction_task_by_id(conn, task_id, "worker-a", 60)?
+        .ok_or_else(|| anyhow::anyhow!("expected captured memory candidate task"))?;
+    assert_eq!(task.id, task_id);
+    assert_eq!(task.task_kind, ExtractionTaskKind::MemoryCandidate);
+    assert_eq!(task.host, "codex-cli");
+    assert_eq!(task.project, project);
+    assert_eq!(task.session_id.as_deref(), Some(session_id));
+    assert_eq!(task.high_watermark_event_id, Some(captured.event_row_id));
+    Ok(task)
 }
 
 fn insert_source_observation(
@@ -770,5 +785,9 @@ async fn memory_candidate_malformed_output_fails_closed() -> Result<()> {
     .expect_err("malformed output should fail");
 
     assert!(err.to_string().contains("malformed memory_candidate"));
+    assert_eq!(
+        db::classify_failure_error(&err),
+        db::FailureClass::Transient
+    );
     Ok(())
 }
