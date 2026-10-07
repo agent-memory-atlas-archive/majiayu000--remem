@@ -212,3 +212,92 @@ async fn research_prompt_event_cannot_override_an_explicit_non_user_role() -> Re
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn long_research_source_whitespace_keeps_review_and_other_candidates() -> Result<()> {
+    let mut conn = Connection::open_in_memory()?;
+    crate::migrate::run_migrations(&conn)?;
+    let source = format!("I work on malware{}analysis.", " \t\n".repeat(200));
+    let ordinary_source = "I prefer   concise\tcode reviews.";
+    assert!(source.len() > 500);
+    let sources = [source.as_str(), ordinary_source];
+    let mut ids = Vec::new();
+    for content in sources {
+        let outcome = db::record_captured_event(
+            &conn,
+            &CaptureEventInput {
+                host: "codex-cli",
+                session_id: "research-whitespace",
+                project: "/tmp/research-review",
+                cwd: None,
+                event_type: "message",
+                role: Some("user"),
+                tool_name: None,
+                content,
+                task_kind: Some(ExtractionTaskKind::UserContextCandidate),
+            },
+        )?;
+        ids.push(outcome.event_row_id);
+    }
+    let task = db::claim_next_extraction_task(&mut conn, "research-test", 60)?.unwrap();
+    let response = serde_json::json!({"candidates": [{
+        "claim_type": "activity", "claim_key": "activity:security-research",
+        "claim_text": "User works on malware analysis.", "confidence": 0.99,
+        "sensitivity": "normal", "risk_class": "low",
+        "source_kind": "explicit_user_statement", "source_event_ids": [ids[0]],
+    }, {
+        "claim_type": "preference", "claim_key": "preference:review-style",
+        "claim_text": "User prefers concise code reviews.", "confidence": 0.99,
+        "sensitivity": "normal", "risk_class": "low",
+        "source_kind": "explicit_user_statement", "source_event_ids": [ids[1]],
+    }]})
+    .to_string();
+    let result = process_with_generator(&mut conn, &task, |_| async move { Ok(response) }).await?;
+    assert_eq!(
+        result,
+        super::super::UserContextCandidateExtractResult::Written {
+            candidates: 2,
+            promoted: 1,
+            pending_review: 1,
+            to_event_id: ids[1],
+        }
+    );
+    for (index, key, expected_status, expected_reason, expected_preview) in [
+        (
+            0,
+            "activity:security-research",
+            "pending_review",
+            Some(REVIEW_REASON),
+            "I work on malware analysis.",
+        ),
+        (
+            1,
+            "preference:review-style",
+            "auto_promoted",
+            None,
+            ordinary_source,
+        ),
+    ] {
+        let (status, reason, preview, refs): (String, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT review_status, auto_promote_block_reason, source_preview, source_refs_json
+             FROM user_context_candidates WHERE claim_key = ?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        assert_eq!(status, expected_status);
+        assert_eq!(reason.as_deref(), expected_reason);
+        assert_eq!(preview, expected_preview);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&refs)?,
+            serde_json::json!([{"kind": "captured_event", "id": ids[index]}])
+        );
+        let raw: String = conn.query_row(
+            "SELECT content_text FROM captured_events WHERE id = ?1",
+            [ids[index]],
+            |row| row.get(0),
+        )?;
+        assert_eq!(raw, sources[index], "raw source must remain unchanged");
+    }
+    Ok(())
+}

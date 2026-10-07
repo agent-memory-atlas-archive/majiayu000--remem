@@ -183,9 +183,6 @@ fn persist_candidates(
     let mut summary = PersistSummary::default();
     for candidate in parsed {
         let source_evidence = source::source_evidence_text(batch, candidate);
-        let source_preview = source_evidence
-            .as_deref()
-            .map(|preview| crate::db::truncate_str(preview, 500).to_string());
         if let Some(reason) =
             non_retention_block_reason(candidate, batch, source_evidence.as_deref())
         {
@@ -196,6 +193,19 @@ fn persist_candidates(
             );
             continue;
         }
+        // Validate the complete original evidence and authorship before compacting
+        // a review-only security clause so the preview limit cannot cut its meaning.
+        let source_preview = source_evidence.as_deref().map(|preview| {
+            let preview =
+                if crate::user_context::non_retention::security_review_key(&candidate.claim_text)
+                    .is_some()
+                {
+                    preview.split_whitespace().collect::<Vec<_>>().join(" ")
+                } else {
+                    preview.to_string()
+                };
+            crate::db::truncate_str(&preview, 500).to_string()
+        });
         let source_refs_json = source::source_refs_json(batch, candidate)?;
         if candidate_exists(conn, candidate, &source_refs_json)? {
             continue;

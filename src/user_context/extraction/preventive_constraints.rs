@@ -185,6 +185,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn long_preventive_source_whitespace_keeps_review_and_other_candidates() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        crate::migrate::run_migrations(&conn)?;
+        let preventive_source = format!("Never{}bypass authentication.", " \t\n".repeat(200));
+        let ordinary_source = "I prefer   concise\tcode reviews.";
+        assert!(preventive_source.len() > 500);
+        let sources = [preventive_source.as_str(), ordinary_source];
+        let mut event_ids = Vec::new();
+        for content in sources {
+            let outcome = db::record_captured_event(
+                &conn,
+                &CaptureEventInput {
+                    host: "codex-cli",
+                    session_id: "preventive-whitespace",
+                    project: "/tmp/remem-preventive",
+                    cwd: None,
+                    event_type: "message",
+                    role: Some("user"),
+                    tool_name: None,
+                    content,
+                    task_kind: Some(ExtractionTaskKind::UserContextCandidate),
+                },
+            )?;
+            event_ids.push(outcome.event_row_id);
+        }
+        let task = db::claim_next_extraction_task(&mut conn, "preventive-test", 60)?
+            .expect("candidate task");
+        let candidates = [
+            (
+                "constraint",
+                "constraint:security",
+                "Never bypass authentication.",
+            ),
+            (
+                "preference",
+                "preference:review-style",
+                "User prefers concise code reviews.",
+            ),
+        ]
+        .into_iter()
+        .zip(&event_ids)
+        .map(|((claim_type, claim_key, claim_text), event_id)| {
+            serde_json::json!({
+                "claim_type": claim_type,
+                "claim_key": claim_key,
+                "claim_text": claim_text,
+                "confidence": 0.99,
+                "sensitivity": "normal",
+                "risk_class": "low",
+                "source_kind": "explicit_user_statement",
+                "source_event_ids": [event_id],
+            })
+        })
+        .collect::<Vec<_>>();
+        let response = serde_json::json!({"candidates": candidates}).to_string();
+        let result =
+            process_with_generator(&mut conn, &task, |_| async move { Ok(response) }).await?;
+        assert_eq!(
+            result,
+            super::super::UserContextCandidateExtractResult::Written {
+                candidates: 2,
+                promoted: 1,
+                pending_review: 1,
+                to_event_id: event_ids[1],
+            }
+        );
+        for (index, key, expected_status, expected_reason, expected_preview) in [
+            (
+                0,
+                "constraint:security",
+                "pending_review",
+                Some(super::REVIEW_REASON),
+                "Never bypass authentication.",
+            ),
+            (
+                1,
+                "preference:review-style",
+                "auto_promoted",
+                None,
+                ordinary_source,
+            ),
+        ] {
+            let (status, reason, preview, refs): (String, Option<String>, String, String) = conn
+                .query_row(
+                "SELECT review_status, auto_promote_block_reason, source_preview, source_refs_json
+                     FROM user_context_candidates WHERE claim_key = ?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(status, expected_status);
+            assert_eq!(reason.as_deref(), expected_reason);
+            assert_eq!(preview, expected_preview);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&refs)?,
+                serde_json::json!([{"kind": "captured_event", "id": event_ids[index]}])
+            );
+            let raw: String = conn.query_row(
+                "SELECT content_text FROM captured_events WHERE id = ?1",
+                [event_ids[index]],
+                |row| row.get(0),
+            )?;
+            assert_eq!(raw, sources[index], "raw source must remain unchanged");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn harmful_positive_quoted_double_negative_and_secret_sources_create_no_candidate(
     ) -> Result<()> {
         for (claim, source) in [
