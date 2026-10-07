@@ -130,11 +130,20 @@ pub(crate) fn create_candidate_with_policy(
             source_preview,
             source_kind,
         );
-    let allowed = auto_promote_allowed(req, source_kind, policy) && !preventive_constraint;
+    let research_context = crate::user_context::non_retention::research::matches_claim_and_preview(
+        text,
+        source_preview,
+        source_kind,
+    );
+    let allowed = auto_promote_allowed(req, source_kind, policy)
+        && !preventive_constraint
+        && !research_context;
     let block_reason = if allowed {
         None
     } else if preventive_constraint {
         Some("preventive_security_constraint_requires_review".to_string())
+    } else if research_context {
+        Some(crate::user_context::non_retention::research::REVIEW_REASON.to_string())
     } else {
         Some(
             normalized_optional(req.auto_promote_block_reason)

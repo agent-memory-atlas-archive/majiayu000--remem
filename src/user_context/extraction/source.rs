@@ -175,12 +175,11 @@ pub(super) fn source_evidence_text(
     batch: &CandidateSourceBatch,
     candidate: &ParsedUserContextCandidate,
 ) -> Option<String> {
-    // Keep a whole protective clause within the stored preview boundary. Its
+    // Keep a whole review-only security clause within the stored preview boundary. Its
     // extraction gate still validates every cited event, including events that
     // do not contribute this preview.
     let preview_count =
-        if crate::user_context::non_retention::prevention::constraint_key(&candidate.claim_text)
-            .is_some()
+        if crate::user_context::non_retention::security_review_key(&candidate.claim_text).is_some()
         {
             1
         } else {
@@ -224,14 +223,13 @@ fn evidence_preview_for_event(
     content: &str,
     candidate: &ParsedUserContextCandidate,
 ) -> Option<String> {
-    // Preserve the exact protective clause, including Chinese text. The
+    // Preserve the exact review-only security clause, including Chinese text. The
     // extraction gate separately checks the actual source event's authorship.
     if let Some(key) =
-        crate::user_context::non_retention::prevention::constraint_key(&candidate.claim_text)
+        crate::user_context::non_retention::security_review_key(&candidate.claim_text)
     {
-        return (crate::user_context::non_retention::prevention::constraint_key(content)
-            == Some(key))
-        .then(|| content.trim().to_string());
+        return (crate::user_context::non_retention::security_review_key(content) == Some(key))
+            .then(|| content.trim().to_string());
     }
     let claim_tokens = preview_match_tokens(&candidate.claim_text);
     if claim_tokens.is_empty() {

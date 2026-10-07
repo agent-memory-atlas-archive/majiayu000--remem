@@ -212,10 +212,6 @@ mod tests {
                 "Never bypass authentication.",
                 "I never bypass authentication. API key is sk-testsecret123456.",
             ),
-            (
-                "User works on malware analysis.",
-                "I work on malware analysis.",
-            ),
             ("用户想绕过认证。", "我想绕过认证。"),
             ("不要绕过认证。", "我不是不要绕过认证。"),
             ("不要绕过认证。", "“不要绕过认证。”"),
@@ -225,7 +221,6 @@ mod tests {
                 "不要绕过认证。",
                 "不要绕过认证。 API key is sk-testsecret123456.",
             ),
-            ("用户从事恶意软件分析。", "我从事恶意软件分析。"),
         ] {
             let conn = extract(claim, &[(Some("user"), source)], "message", None).await?;
             assert_eq!(candidate_count(&conn)?, 0, "{source}");

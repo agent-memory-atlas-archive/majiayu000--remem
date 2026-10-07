@@ -25,12 +25,10 @@ fn preventive_constraints_do_not_bypass_harmful_or_secret_rejection() {
         "User does not want to never bypass authentication.",
         "User never bypass authentication unless convenient.",
         "\"Never bypass authentication.\"",
-        "User works on malware analysis.",
         "用户想绕过认证。",
         "用户不是不要绕过认证。",
         "用户不要绕过认证，除非方便。",
         "“不要绕过认证。”",
-        "用户从事恶意软件分析。",
     ] {
         assert_eq!(
             block_reason(text, Some(text), "explicit_user_statement"),

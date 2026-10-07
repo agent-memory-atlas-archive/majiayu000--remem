@@ -16,6 +16,7 @@ mod policy_tests;
 mod preventive_constraints;
 mod promotion_gate;
 mod prompt;
+mod research_context;
 #[cfg(test)]
 mod review_feedback_tests;
 mod source;
@@ -244,9 +245,11 @@ fn non_retention_block_reason(
         &candidate.source_kind,
     )
     .or_else(|| preventive_constraints::block_reason(candidate, batch))
+    .or_else(|| research_context::block_reason(candidate, batch))
     .or_else(|| {
         (requires_third_party_framing(candidate)
             && !preventive_constraints::is_supported(candidate, batch)
+            && !research_context::is_supported(candidate, batch)
             && !is_supported_third_party_candidate(candidate, batch))
         .then_some("unframed_third_party_detail")
     })
@@ -503,6 +506,7 @@ fn is_supported_for_candidate_queue(
     is_supported_by_user_source_event(candidate, batch)
         || is_supported_negative_user_constraint(candidate, batch)
         || preventive_constraints::is_supported(candidate, batch)
+        || research_context::is_supported(candidate, batch)
 }
 
 fn has_behavior_source_evidence(

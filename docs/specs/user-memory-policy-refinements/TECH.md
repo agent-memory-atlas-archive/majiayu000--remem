@@ -341,8 +341,23 @@ promotion. Existing human review remains the activation route.
 Paired extraction and scanner tests cover English/Chinese protective versus
 affirmative intent, secrets, quotations, double negatives, conditional/mixed
 clauses, and external evidence. The prompt distinguishes explicit preventive
-constraints from harmful claims. Ambiguous research terms remain blocked under
-the existing contract until a separately reviewed intent policy exists.
+constraints from harmful claims. Bare research labels remain blocked; the review-only extension below requires
+a complete supported user activity.
+
+### Review-only security context (2026-10-07)
+
+`non_retention::research` recognizes complete user activity clauses and explicit
+analytical quotations, with separate stable keys for their topics and framing.
+It shares no prefix/substring exemption with harmful-instruction detection.
+Secret and non-retention checks still run before candidate insertion. Only a
+matching complete claim/preview pair can enter this path.
+
+`extraction::research_context` additionally requires an activity, skill or role
+claim and validates every citation against the original event's role, type,
+tool provenance and complete clause. Repeated valid sources keep one complete
+preview; no truncated source can conceal a later unsafe citation. The shared
+candidate store forces review even if a caller requests automatic promotion.
+Human approval retains the existing final non-retention recheck.
 
 ## Issue Split
 

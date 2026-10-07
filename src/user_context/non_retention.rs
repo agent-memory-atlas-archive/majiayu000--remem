@@ -1,4 +1,9 @@
 pub(crate) mod prevention;
+pub(crate) mod research;
+
+pub(crate) fn security_review_key(text: &str) -> Option<&'static str> {
+    prevention::constraint_key(text).or_else(|| research::activity_key(text))
+}
 
 pub(crate) fn block_reason(
     claim_text: &str,
@@ -22,6 +27,7 @@ pub(crate) fn block_reason(
     }
     if contains_illegal_or_harmful_content(&blob)
         && !prevention::matches_claim_and_preview(claim_text, source_preview, source_kind)
+        && !research::matches_claim_and_preview(claim_text, source_preview, source_kind)
     {
         return Some("illegal_or_harmful_content");
     }

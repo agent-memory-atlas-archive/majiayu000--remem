@@ -204,7 +204,10 @@ once-worker restarts. The existing once-worker admission budget still applies.
 
 Generated memory is treated as untrusted until it passes source-support,
 secret, instruction-pattern, scope, and lifecycle checks. Unsafe content is
-dropped or routed to review with a diagnosable reason.
+dropped or routed to review with a diagnosable reason. Complete, user-supported
+security prohibitions, research activities and explicitly analytical quotations
+can enter human review in English or Chinese; they never auto-promote. Secret
+values, harmful instructions and unsupported external text remain excluded.
 
 Automatically promoted summary decisions and discoveries can enter current
 context at their original summary confidence when captured local evidence,
