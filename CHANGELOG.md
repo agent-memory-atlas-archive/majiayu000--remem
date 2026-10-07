@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Staged source version `0.6.102` reports permanent and retry-exhausted background job failures at error level without promising an automatic retry.
 - Staged source version `0.6.101` binds session-intent preview and apply to the eligible summary shown by session listings, leaving hidden quarantined summaries unchanged.
 - Staged source version `0.6.100` redacts embedded credentials in raw session, REST session/workstream, and activity labels after rendering, preserving valid topics when redaction expands their length.
 - Staged source version `0.6.99` redacts embedded secrets in session intent preview topics and reasons before audit and apply (#1093).
@@ -333,6 +334,11 @@
   the immutable quarantine ledger is written.
 
 ### Changed
+- Staged `0.6.102` Rust source compatibility: exhaustive matches on
+  `JobTransitionOutcome` must handle `TerminalFailure`. The failure-lifecycle
+  spec documents its persisted terminal-failure meaning and caller migration;
+  replacement surface fingerprints remain staged and the published release
+  baseline is unchanged.
 - GH-932/GH-934: one plan type instead of two. `ContextPlan` and the
   `context_bundle` planner are removed; `RetrievalPlan` now carries both the
   retrieval-source side (`channel_plans`) and the output-section side
