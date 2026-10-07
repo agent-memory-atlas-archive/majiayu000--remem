@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## [0.6.103] - 2026-10-07
+
+- Publish the audited memory-pipeline fixes and recovery boundaries from #1106, with verified Linux and macOS release packages.
+
+## Source staging history
 
 ### Added
 - Staged source version `0.6.103` closes audited memory-pipeline gaps: governed summary admission and evidence-versioned pending candidates; profile-isolated, scope-prefiltered vector recall; bounded extraction and verified replay progress; durable fair dispatch; complete AI-attempt evidence and cost-coverage reporting; conservative workstream identity; selected Codex profile consistency; and worker liveness/retirement. Refs #1102, #1103, #1104, #1105.
