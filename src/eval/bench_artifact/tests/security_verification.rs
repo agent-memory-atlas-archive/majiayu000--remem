@@ -247,6 +247,8 @@ fn security_authority_rejects_semantically_identical_unregistered_suite_bytes() 
     for report_relative in [
         "memory/reports/adversarial-policy-v2.json",
         "memory/reports/adversarial-policy-v2-linux-x86_64.json",
+        "memory/reports/adversarial-policy-v2-x86_64-apple-darwin.json",
+        "memory/reports/adversarial-policy-v2-aarch64-unknown-linux-gnu.json",
     ] {
         let report_path = root.join(report_relative);
         let report: Value = serde_json::from_slice(&fs::read(&report_path)?)?;

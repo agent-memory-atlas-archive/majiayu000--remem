@@ -435,6 +435,9 @@ pub(super) fn upsert_prepared_memory_embedding_batch(
 }
 
 #[cfg(test)]
+mod source_freshness_tests;
+
+#[cfg(test)]
 mod profile_batch_tests {
     use super::*;
 

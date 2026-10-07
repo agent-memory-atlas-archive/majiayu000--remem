@@ -438,3 +438,74 @@ fn doctor_degraded_embedding_does_not_initialize_store_or_logs() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn doctor_provider_diagnostics_keep_data_directory_absent() {
+    let cases = [
+        (
+            "api",
+            "configured embedding provider api unavailable",
+            "using fallback feature-hash",
+        ),
+        #[cfg(windows)]
+        (
+            "auto",
+            "Windows local embedding security policy rejected the model root",
+            "using feature-hash",
+        ),
+    ];
+    for (provider, expected_reason, expected_resolution) in cases {
+        let root = install_status_temp_root();
+        let data = root.join("data");
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let doctor = isolated_codex_command(&root, std::ffi::OsStr::new("relative-profile"))
+            .args(["doctor", "--json"])
+            .env("REMEM_EMBEDDINGS_PROVIDER", provider)
+            .env("REMEM_EMBEDDINGS_FALLBACK", "feature-hash")
+            .env(
+                "REMEM_EMBEDDINGS_API_KEY_ENV",
+                "REMEM_TEST_MISSING_EMBEDDING_KEY",
+            )
+            .env_remove("REMEM_TEST_MISSING_EMBEDDING_KEY")
+            .env_remove("REMEM_EMBEDDINGS_API_KEY")
+            .env_remove("REMEM_EMBEDDING_API_KEY")
+            .env_remove("REMEM_EMBEDDINGS_MODEL_DIR")
+            .output()
+            .unwrap();
+        assert!(!doctor.status.success(), "{doctor:?}");
+        let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+        let checks = report["checks"].as_array().unwrap();
+        let embedding = checks
+            .iter()
+            .find(|check| check["name"] == "Embedding provider")
+            .expect("embedding provider diagnostic");
+        assert_eq!(embedding["status"], "warn", "{embedding}");
+        assert!(
+            embedding["detail"]
+                .as_str()
+                .unwrap()
+                .contains(expected_reason),
+            "{embedding}"
+        );
+        for name in ["Hooks (codex)", "MCP (codex)", "Capture capability (codex)"] {
+            let check = checks.iter().find(|check| check["name"] == name).unwrap();
+            assert_eq!(check["status"], "fail", "{check}");
+            assert!(
+                check["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("invalid Codex home"),
+                "{check}"
+            );
+        }
+        let stderr = String::from_utf8_lossy(&doctor.stderr);
+        assert!(stderr.contains("[ERROR] [embedding]"), "{stderr}");
+        assert!(stderr.contains(expected_reason), "{stderr}");
+        assert!(stderr.contains(expected_resolution), "{stderr}");
+        assert!(
+            !data.exists(),
+            "doctor must leave the data directory absent during provider diagnostics\n{stderr}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
