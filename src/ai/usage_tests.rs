@@ -145,7 +145,7 @@ fn fake_profile(
     } else {
         ":"
     };
-    let script = format!("#!/bin/sh\nwhile [ \"$#\" -gt 0 ]; do\nif [ \"$1\" = '--output-last-message' ]; then shift; output=\"$1\"; fi\nshift\ndone\ncat >/dev/null\n{log}\n{ending}\n");
+    let script = format!("#!/bin/sh\nif [ \"$1\" = '--remem-fixture-ready' ]; then exit 0; fi\nwhile [ \"$#\" -gt 0 ]; do\nif [ \"$1\" = '--output-last-message' ]; then shift; output=\"$1\"; fi\nshift\ndone\ncat >/dev/null\n{log}\n{ending}\n");
     std::fs::write(&path, script)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
     Ok(crate::runtime_config::ResolvedMemoryAiProfile {
@@ -226,6 +226,13 @@ fn usage_attempt_timeout_preserves_terminal_counters_already_read() -> Result<()
         "while :; do sleep 0.02; done",
         true,
     )?;
+    // Keep cold executable startup outside the timed usage behavior.
+    assert!(
+        std::process::Command::new(profile.cli_path.as_ref().unwrap())
+            .arg("--remem-fixture-ready")
+            .status()?
+            .success()
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -274,6 +281,11 @@ fn usage_attempt_stdin_failure_and_backpressure_keep_output_evidence() -> Result
         let path = profile.cli_path.as_ref().unwrap();
         let script = std::fs::read_to_string(path)?.replace("cat >/dev/null", input_action);
         std::fs::write(path, script)?;
+        // Warm the final rewritten script before starting the behavior deadline.
+        assert!(std::process::Command::new(path)
+            .arg("--remem-fixture-ready")
+            .status()?
+            .success());
         let started = std::time::Instant::now();
         let error = runtime
             .block_on(super::codex_cli::call_codex_cli_with_timeout(
