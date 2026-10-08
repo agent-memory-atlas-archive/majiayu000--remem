@@ -407,6 +407,14 @@ row and session counts. When a surviving transcript maps those legacy rows to
 exactly one trusted identity and stable fields match, batch ingestion merges
 the duplicate rows and preserves evidence references.
 
+Remem owns automatic capture and governed Agent recall; Refine owns human
+knowledge inspection and reuse; agent-sessions owns native format parsing.
+Consumers reuse the exact raw-session selector, `session_ref`, content fingerprint,
+and existing `lookup_commit` / `commits_for_session` evidence. The read-only
+`doctor memory` report composes those existing boundaries with extraction,
+review, CurrentTruth and per-item injection audits; it adds no capture store or
+consumer-specific schema. See [the diagnosis contract](specs/memory-diagnosis/TECH.md).
+
 The raw query path is read-only and schema-validated:
 
 ```text

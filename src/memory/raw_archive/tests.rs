@@ -772,3 +772,6 @@ fn date_only_until_bound_includes_the_full_utc_day() {
 
 #[path = "tests/session_contract.rs"]
 mod session_contract;
+
+#[path = "tests/search_plan.rs"]
+mod search_plan;

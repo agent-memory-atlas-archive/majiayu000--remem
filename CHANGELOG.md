@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.104] - Unreleased
+
+- Add `doctor memory` to inspect existing capture, extraction, review, validity
+  and context-run evidence in one read-only report, with explicit unknowns and
+  preserved raw-session/commit consumer boundaries.
+
+
 ## [0.6.103] - 2026-10-07
 
 - Publish the audited memory-pipeline fixes and recovery boundaries from #1106, with verified Linux and macOS release packages.

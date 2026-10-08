@@ -108,6 +108,33 @@ For a focused, read-only view of current-memory truth:
 remem doctor truth --cwd .
 ```
 
+### Why wasn't something remembered?
+
+Use one read-only report to follow capture, extraction, review, current validity,
+and the latest recorded context run:
+
+```bash
+remem doctor memory "original phrase" --cwd .
+remem doctor memory --host codex-cli --source-root local \
+  --project PROJECT_KEY --session-id SESSION_ID --json
+```
+
+Copy the exact selector from `remem raw sessions --json`. Use
+`--injection-run-id RUN_ID` to inspect a specific destination context emission.
+The source session and destination context run are distinct. Each evidence
+source is bounded at 20 rows; omitted evidence is marked. Terminal output shows
+retained source/status counts and three samples per source; `--json` includes
+all retained evidence. A missing match or
+per-item audit is **unknown**, not proof that capture failed or a guessed drop
+reason. Query discovery combines raw search with literal stored-text matches;
+try an original phrase or the exact session when a paraphrase finds no evidence.
+See the [diagnosis contract](docs/specs/memory-diagnosis/PRODUCT.md).
+
+Remem helps an Agent continue work; Refine helps people inspect and reuse
+knowledge; agent-sessions parses native source formats. Refine consumes Remem's
+existing session references, content fingerprints and commit/session links
+instead of collecting another transcript copy.
+
 ## Host support
 
 | Capability | Claude Code | Codex CLI | Cursor v1 |

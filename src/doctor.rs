@@ -11,6 +11,7 @@ pub(crate) mod health_action;
 mod legacy_surfaces;
 mod logging;
 mod mcp_processes;
+mod memory_diagnostic;
 mod memory_poisoning;
 mod native_memory;
 mod pack_imports;
@@ -31,3 +32,5 @@ mod types;
 
 pub(crate) use report::{run_doctor, DoctorOptions};
 pub(crate) use truth::{run_truth_doctor, TruthDoctorOptions};
+
+pub(crate) use memory_diagnostic::{run_memory_diagnostic, MemoryDiagnosticOptions};

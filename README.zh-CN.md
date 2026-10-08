@@ -374,3 +374,21 @@ remem uninstall
 ## License
 
 MIT
+
+## 为什么没记住
+
+```bash
+remem doctor memory "原话片段" --cwd .
+remem doctor memory --host codex-cli --source-root local \
+  --project PROJECT_KEY --session-id SESSION_ID --json
+```
+
+一个只读报告串起采集、提炼、审核、当前有效性和上下文审计。会话标识从
+`remem raw sessions --json` 原样复制；`--injection-run-id RUN_ID` 可指定目标
+上下文轮次。JSON 每类最多保留 20 条并标记截断；终端显示各来源的保留条数、
+已有状态及前三条样本，完整保留证据可用 `--json` 查看。没有命中或审计就显示未知，
+不会猜测“没采集”或丢弃原因；问题查询结合原始搜索与原文匹配，改写问法
+没有结果时可用原话片段或精确会话。详见[合同](docs/specs/memory-diagnosis/PRODUCT.md)。
+
+Remem 帮助 Agent 继续工作，Refine 帮助人检查和复用知识，agent-sessions
+解析原始格式；共用会话来源标识、内容指纹及现有 commit/session 证据，避免重复采集。
